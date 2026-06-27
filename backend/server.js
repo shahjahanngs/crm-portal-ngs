@@ -18,6 +18,7 @@ import specialOffer from "./routes/specialOffer.route.js";
 import zipRoutes from "./routes/zipAccounts.routes.js";
 import umrahBookingRoutes from "./routes/umrahBooking.routes.js";
 import teamContactRoutes from "./routes/teamContact.routes.js";
+import companyProfileRoutes from "./routes/companyProfile.routes.js";
 
 import testEmail from "./utils/testEmail.js";
 import { startBookingExpiryJob } from "./utils/bookingExpiryJob.js";
@@ -44,7 +45,12 @@ app.use(
       "http://localhost:5173",
       "http://localhost:3000",
       "http://localhost:3001",
+      "http://localhost:5001",
       "https://rgs.zipaccounts.com",
+      "https://crm.zipaccounts.com",
+      "https://crm.zipaccounts.com/app4",
+      "https://rgsumrah.pk",
+      "https://rgsumrah.com",
     ],
     credentials: true,
   }),
@@ -68,6 +74,7 @@ app.use("/api/specialOffer", specialOffer);
 app.use("/api/team-contacts", teamContactRoutes);
 app.use("/api/umrah-bookings", umrahBookingRoutes);
 app.use("/api/zip-accounts", zipRoutes);
+app.use("/api/companyProfile", companyProfileRoutes);
 
 // Sabaoon integration removed. Only Al-Haider API is used for group data.
 
@@ -113,7 +120,7 @@ app.use((req, res, next) => {
 });
 
 app.get("/", (req, res) => {
-  res.send("CRM Portal travel and tours (Pvt Ltd ) API is running");
+  res.send("RGS UMRAH GROUP OF COMPANY'S API is running");
 });
 
 const PORT = process.env.PORT || 8016;

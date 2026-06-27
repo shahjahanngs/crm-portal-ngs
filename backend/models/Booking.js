@@ -220,6 +220,17 @@ const bookingSchema = new mongoose.Schema(
       enum: ["pending", "success", "failed", "not_applicable"],
       default: "pending",
     },
+
+    // Booking Source
+    source: {
+      type: String,
+      enum: ["admin", "sabaoon", "zip-api"],
+      default: "admin",
+    },
+
+    // ZIP Accounts Integration
+    zipBookingId: String, // ID of booking created in ZIP Accounts
+    zipBookingRefNo: String, // Reference number from ZIP Accounts
   },
   {
     timestamps: true,

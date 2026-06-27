@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import axiosInstance from "../../api/axios";
 import MaskedDatePicker from "../../components/MaskedDatePicker";
 import TopBar from "../../components/TopBar/TopBar";
+import { CreditCard } from "lucide-react";
 
 const Payment = () => {
   // Get current year for default date filter
@@ -268,7 +269,10 @@ const Payment = () => {
   return (
     <div className="w-full min-h-screen mx-auto px-2 sm:px-4 md:px-0">
       {/* Header */}
-      <TopBar title={"Add Payments"} />
+      <TopBar
+        title={"Add Payments"}
+        icon={<CreditCard className="text-white w-6 h-6" />}
+      />
 
       {/* Add Payment Form */}
       <div className="bg-white rounded-lg shadow-md p-3 sm:p-4 md:p-6 mb-4 sm:mb-6">

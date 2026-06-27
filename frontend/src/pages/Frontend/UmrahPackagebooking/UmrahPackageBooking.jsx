@@ -1,10 +1,5 @@
 import React, { useState, useEffect, useMemo } from "react";
 import {
-  getMyBookings,
-  submitPayment,
-  updateUmrahBooking,
-} from "../../../api/umrahBookingApi";
-import {
   Search,
   RefreshCw,
   Filter,
@@ -20,10 +15,63 @@ import {
   Building,
   Edit2,
   Save,
+  Scan,
   UserPlus,
   Trash2,
+  Package,
 } from "lucide-react";
 import { toast } from "react-toastify";
+import TopBar from "../../../components/TopBar/TopBar";
+import axiosInstance from "../../../api/axios";
+import { printGDSBooking } from "../../../utils/bookingPDFService";
+import { parseMRZ } from "../../../utils/parseMRZ";
+
+const ROOM_CAPACITY = {
+  sharing: 1,
+  double: 2,
+  triple: 3,
+  quad: 4,
+  quint: 5,
+  hexa: 6,
+};
+
+const ROOM_ORDER = ["sharing", "quint", "quad", "triple", "double", "hexa"];
+
+const normalizeSeatId = (value) => {
+  if (value === null || value === undefined) return "";
+  return String(value).trim();
+};
+
+const buildRemainingSeatsMap = (items = []) => {
+  const map = {};
+
+  items.forEach((item) => {
+    const ids = [
+      item.groupTicketingId,
+      item.groupId,
+      item.ticketingGroupId,
+      item._id,
+      item.id,
+    ]
+      .map(normalizeSeatId)
+      .filter(Boolean);
+    const remainingSeats =
+      item.remainingSeats ??
+      item.availableSeats ??
+      item.available_no_of_pax ??
+      item.seatsLeft;
+
+    if (remainingSeats !== null && remainingSeats !== undefined) {
+      ids.forEach((id) => {
+        map[id] = Number(remainingSeats);
+      });
+    }
+  });
+
+  return map;
+};
+
+const normalizeRoomType = (roomType) => (roomType || "").toLowerCase().trim();
 
 export default function UmrahBooking() {
   const [bookings, setBookings] = useState([]);
@@ -52,16 +100,35 @@ export default function UmrahBooking() {
   const [showEditModal, setShowEditModal] = useState(false);
   const [editForm, setEditForm] = useState({
     passengers: [],
+    roomType: "",
+    pricePerPerson: 0,
+    totalPrice: 0,
     specialRequests: "",
   });
   const [isUpdating, setIsUpdating] = useState(false);
+  const [passportFiles, setPassportFiles] = useState({});
+  const [editRemainingSeats, setEditRemainingSeats] = useState(null);
+  const [mrzModal, setMrzModal] = useState({ open: false, index: null });
+  const [mrzInput, setMrzInput] = useState("");
+  const [mrzError, setMrzError] = useState("");
+  const [timers, setTimers] = useState({});
+  const [printingVoucherId, setPrintingVoucherId] = useState(null);
 
   const fetchBookings = async () => {
     try {
       setLoading(true);
-      const response = await getMyBookings();
-      console.log(response);
-      setBookings(response.data || []);
+      const response = await axiosInstance.get("/zip-accounts/get-booking");
+      const storedUser = localStorage.getItem("frontend_user");
+      const currentUserId = storedUser
+        ? JSON.parse(storedUser)?.zipId || JSON.parse(storedUser)?.id
+        : null;
+      const allBookings = response.data.data.bookings || [];
+      console.log(storedUser, response.data.data);
+
+      const filtered = currentUserId
+        ? allBookings.filter((b) => b.created_by === currentUserId)
+        : allBookings;
+      setBookings(filtered);
     } catch (error) {
       console.error("Error fetching bookings:", error);
       toast.error("Failed to fetch bookings");
@@ -94,64 +161,645 @@ export default function UmrahBooking() {
     setReceiptFile(null);
   };
 
+  const getBookingNumber = (booking) =>
+    booking?.refNo ||
+    booking?.bookingId ||
+    booking?.metadata?.bookingNumber ||
+    booking?.metadata?.localBookingId ||
+    "";
+
+  const handlePrintVoucher = async (booking) => {
+    const bookingNumber = getBookingNumber(booking);
+    if (!bookingNumber) {
+      toast.error("Booking number not found");
+      return;
+    }
+
+    const voucherWindow = window.open("", "_blank");
+    if (!voucherWindow) {
+      toast.error("Please allow pop-ups to view the voucher");
+      return;
+    }
+    voucherWindow.opener = null;
+
+    try {
+      setPrintingVoucherId(booking._id);
+      const response = await axiosInstance.get(
+        `/zip-accounts/voucher/${encodeURIComponent(bookingNumber)}`,
+      );
+      const payload = response.data?.data || response.data || {};
+      const publicToken = payload.publicToken || payload.voucher?.public_token;
+      const sharePath =
+        payload.sharePath ||
+        (publicToken ? `/app4/share/umrah-voucher/${publicToken}` : "");
+
+      if (!sharePath) {
+        voucherWindow.close();
+        toast.info("Your voucher is not generated till now");
+        return;
+      }
+
+      const voucherUrl = sharePath.startsWith("http")
+        ? sharePath
+        : `${window.location.origin}${sharePath}`;
+      voucherWindow.location.href = voucherUrl;
+    } catch (error) {
+      voucherWindow.close();
+      const status = error.response?.status;
+      if (status === 404) {
+        toast.info("Your voucher is not generated till now");
+        return;
+      }
+      toast.error(error.response?.data?.message || "Failed to open voucher");
+    } finally {
+      setPrintingVoucherId(null);
+    }
+  };
+
+  const normalizePassengerForEdit = (passenger = {}) => {
+    const nameParts = (passenger.name || "").trim().split(/\s+/);
+    const fallbackGivenName = nameParts[0] || "";
+    const fallbackSurName = nameParts.slice(1).join(" ");
+
+    return {
+      ...passenger,
+      type: passenger.type || "Adult",
+      title: passenger.title || "Mr",
+      givenName: passenger.givenName || fallbackGivenName,
+      surName: passenger.surName || fallbackSurName,
+      passport: passenger.passport || passenger.passportNumber || "",
+      dateOfBirth: passenger.dateOfBirth || passenger.dob || "",
+      passportExpiry: passenger.passportExpiry || "",
+      nationality: passenger.nationality || "Pakistan",
+    };
+  };
+
+  const getOriginalPackage = (booking = selectedBooking) =>
+    booking?.metadata?.originalPkg || booking?.originalPkg || {};
+
+  const getPackageRooms = (booking = selectedBooking) =>
+    getOriginalPackage(booking)?.rooms || {};
+
+  const getRoomPrice = (roomType, booking = selectedBooking) => {
+    const normalizedRoom = normalizeRoomType(roomType);
+    const price = Number(getPackageRooms(booking)?.[normalizedRoom]);
+    if (Number.isFinite(price) && price > 0) return price;
+
+    if (normalizedRoom === normalizeRoomType(booking?.metadata?.roomType)) {
+      const fallbackPrice = Number(booking?.metadata?.pricePerPerson);
+      if (Number.isFinite(fallbackPrice) && fallbackPrice > 0) {
+        return fallbackPrice;
+      }
+    }
+
+    return 0;
+  };
+
+  const getChildPrice = (booking = selectedBooking) => {
+    const pkg = getOriginalPackage(booking);
+    return Number(
+      pkg?.rooms?.childWithoutPackage ??
+      pkg?.childPrice ??
+      booking?.metadata?.childPrice ??
+      0,
+    );
+  };
+
+  const getInfantPrice = (booking = selectedBooking) => {
+    const pkg = getOriginalPackage(booking);
+    return Number(
+      pkg?.rooms?.InfantWithoutPackage ??
+      pkg?.rooms?.infantWithoutPackage ??
+      pkg?.infantPrice ??
+      booking?.metadata?.infantPrice ??
+      0,
+    );
+  };
+
+  const getPassengerSeatCount = (passengers = []) =>
+    passengers.filter((p) => p.type !== "Infant").length;
+
+  const getAdultLimit = (roomType, booking = selectedBooking) => {
+    const normalizedRoom = normalizeRoomType(roomType);
+    const effectiveSeatLimit = getEffectiveSeatLimit(booking);
+    const roomCapacity = ROOM_CAPACITY[normalizedRoom];
+
+    // Sharing rooms: each adult occupies one sharing room — limit by seat availability only
+    if (normalizedRoom === "sharing") return effectiveSeatLimit;
+    if (!roomCapacity) return effectiveSeatLimit;
+    if (effectiveSeatLimit === null) return roomCapacity;
+    return Math.min(roomCapacity, effectiveSeatLimit);
+  };
+
+  const getRequiredAdultCount = (roomType) => {
+    const normalizedRoom = normalizeRoomType(roomType);
+    if (normalizedRoom === "sharing") return null;
+    return ROOM_CAPACITY[normalizedRoom] || null;
+  };
+
+  const getAvailableSeatsFromPackage = (booking = selectedBooking) => {
+    const pkg = getOriginalPackage(booking);
+    const value =
+      editRemainingSeats ??
+      pkg?.remainingSeats ??
+      pkg?.availableRooms ??
+      pkg?.availableSeats ??
+      booking?.metadata?.availableSeats;
+    const seats = Number(value);
+    return Number.isFinite(seats) ? seats : null;
+  };
+
+  const getOriginalSeatCount = (booking = selectedBooking) =>
+    getPassengerSeatCount(
+      booking?.metadata?.passengers || booking?.passengers || [],
+    );
+
+  const getEffectiveSeatLimit = (booking = selectedBooking) => {
+    const availableSeats = getAvailableSeatsFromPackage(booking);
+    if (availableSeats === null) return null;
+    return Math.max(0, availableSeats + getOriginalSeatCount(booking));
+  };
+
+  const getPayingPassengerLimit = (booking = selectedBooking) =>
+    getEffectiveSeatLimit(booking);
+
+  const getEditableRoomOptions = (booking = selectedBooking) => {
+    const rooms = getPackageRooms(booking);
+    const currentRoom = normalizeRoomType(booking?.metadata?.roomType);
+    const effectiveSeatLimit = getEffectiveSeatLimit(booking);
+
+    const options = ROOM_ORDER.filter((room) => {
+      const price = Number(rooms?.[room]);
+      const hasPrice = Number.isFinite(price) && price > 0;
+      const isCurrentRoom = room === currentRoom;
+      if (!hasPrice && !isCurrentRoom) return false;
+      if (room === "sharing") return true;
+      if (effectiveSeatLimit === null) return true;
+      return effectiveSeatLimit >= (ROOM_CAPACITY[room] || 1) || isCurrentRoom;
+    });
+
+    if (currentRoom && !options.includes(currentRoom)) {
+      options.unshift(currentRoom);
+    }
+
+    return options;
+  };
+
+  const calculateEditTotal = (
+    passengers = editForm.passengers,
+    roomType = editForm.roomType,
+    booking = selectedBooking,
+  ) => {
+    const roomPrice = getRoomPrice(roomType, booking);
+    return passengers.reduce((sum, passenger) => {
+      if (passenger.type === "Infant") return sum + getInfantPrice(booking);
+      if (passenger.type === "Child") return sum + getChildPrice(booking);
+      return sum + roomPrice;
+    }, 0);
+  };
+
+  const getEditPassengerCounts = (passengers = editForm.passengers) =>
+    passengers.reduce(
+      (acc, passenger) => {
+        if (passenger.type === "Infant") acc.infants += 1;
+        else if (passenger.type === "Child") acc.children += 1;
+        else acc.adults += 1;
+        return acc;
+      },
+      { adults: 0, children: 0, infants: 0 },
+    );
+
+  const formatMrzDate = (date) =>
+    date instanceof Date && !Number.isNaN(date.getTime())
+      ? date.toISOString().split("T")[0]
+      : "";
+
+  const handleOpenMrzModal = (index) => {
+    setMrzModal({ open: true, index });
+    setMrzInput("");
+    setMrzError("");
+  };
+
+  const handleCloseMrzModal = () => {
+    setMrzModal({ open: false, index: null });
+    setMrzInput("");
+    setMrzError("");
+  };
+
+  const handleMrzParse = () => {
+    const rawBlocks = mrzInput.trim().split(/\n[ \t]*\n/);
+    let results = [];
+
+    if (rawBlocks.length > 1) {
+      results = rawBlocks
+        .map((block) => parseMRZ(block.trim()))
+        .filter(Boolean);
+    } else {
+      const lines = mrzInput
+        .trim()
+        .split("\n")
+        .map((line) => line.trim())
+        .filter(Boolean);
+
+      for (let i = 0; i + 1 < lines.length; i += 2) {
+        const parsed = parseMRZ(`${lines[i]}\n${lines[i + 1]}`);
+        if (parsed) results.push(parsed);
+      }
+    }
+
+    if (!results.length) {
+      setMrzError(
+        "Invalid MRZ code. Please paste the complete 2-line MRZ from the passport.",
+      );
+      return;
+    }
+
+    const startIndex = mrzModal.index ?? 0;
+    let appliedCount = 0;
+    const updatedPassengers = editForm.passengers.map((passenger, index) => {
+      const result = results[index - startIndex];
+      if (index < startIndex || !result) return passenger;
+
+      appliedCount += 1;
+      return {
+        ...passenger,
+        title: result.title || passenger.title,
+        givenName: result.givenName || passenger.givenName,
+        surName: result.surName || passenger.surName,
+        passport: result.passport || passenger.passport,
+        nationality: result.nationality || passenger.nationality,
+        dateOfBirth: formatMrzDate(result.dateOfBirth) || passenger.dateOfBirth,
+        passportExpiry:
+          formatMrzDate(result.passportExpiry) || passenger.passportExpiry,
+      };
+    });
+
+    setEditForm({
+      ...editForm,
+      passengers: updatedPassengers,
+      totalPrice: calculateEditTotal(updatedPassengers, editForm.roomType),
+    });
+    toast.success(`${appliedCount} passport${appliedCount > 1 ? "s" : ""} scanned`);
+    handleCloseMrzModal();
+  };
+
+  const getEditLimitError = (
+    passengers = editForm.passengers,
+    roomType = editForm.roomType,
+    { requireMinimumAdults = false, ignoreAdultMaximum = false } = {},
+  ) => {
+    const counts = getEditPassengerCounts(passengers);
+    const payingPassengers = counts.adults + counts.children;
+    const adultLimit = getAdultLimit(roomType);
+    const requiredAdults = getRequiredAdultCount(roomType);
+    const payingLimit = getPayingPassengerLimit();
+
+    if (
+      !ignoreAdultMaximum &&
+      adultLimit !== null &&
+      counts.adults > adultLimit
+    ) {
+      return `${roomType} room allows only ${adultLimit} adult${adultLimit > 1 ? "s" : ""}.`;
+    }
+
+    if (
+      requireMinimumAdults &&
+      requiredAdults !== null &&
+      counts.adults < requiredAdults
+    ) {
+      return `${roomType} room requires ${requiredAdults} adult${requiredAdults > 1 ? "s" : ""}.`;
+    }
+
+    if (payingLimit !== null && payingPassengers > payingLimit) {
+      return `Only ${payingLimit} adult/child passenger${payingLimit > 1 ? "s" : ""} can be booked within package availability.`;
+    }
+
+    return "";
+  };
+
+  const canRemovePassenger = (
+    passenger,
+    passengers = editForm.passengers,
+    roomType = editForm.roomType,
+  ) => {
+    if (passengers.length <= 1) return false;
+    if (passenger.type !== "Adult") return true;
+
+    const requiredAdults = getRequiredAdultCount(roomType);
+    if (requiredAdults === null) return true;
+
+    const adultCount = getEditPassengerCounts(passengers).adults;
+    return adultCount > requiredAdults;
+  };
+
+  const fetchRemainingSeatsForEdit = async (booking) => {
+    const pkg = getOriginalPackage(booking);
+    const packageIds = [
+      booking?.metadata?.packageId,
+      booking?.bookingAgainst,
+      pkg?._id,
+      pkg?.id,
+      pkg?.zipPackageId,
+    ]
+      .map(normalizeSeatId)
+      .filter(Boolean);
+    const groupTicketingIds = [
+      pkg?.groupTicketingId,
+      booking?.metadata?.groupTicketingId,
+      booking?.groupTicketingId,
+    ]
+      .map(normalizeSeatId)
+      .filter(Boolean);
+
+    if (!packageIds.length && !groupTicketingIds.length) return;
+
+    try {
+      const [groupTicketingRes, packageSeatsRes] = await Promise.all([
+        axiosInstance
+          .get("/zip-accounts/group-ticketing")
+          .catch(() => ({ data: { data: [] } })),
+        axiosInstance
+          .get("/zip-accounts/umrahPackages/remaining-seats")
+          .catch(() => ({ data: { data: [] } })),
+      ]);
+      const groupSeatsMap = buildRemainingSeatsMap(
+        groupTicketingRes.data?.data || [],
+      );
+      const packageSeatsMap = buildRemainingSeatsMap(
+        packageSeatsRes.data?.data || [],
+      );
+      const matchedGroupSeats = groupTicketingIds
+        .map((id) => groupSeatsMap[id])
+        .find((value) => Number.isFinite(Number(value)));
+      const matchedPackageSeats = [...packageIds, ...groupTicketingIds]
+        .map((id) => packageSeatsMap[id])
+        .find((value) => Number.isFinite(Number(value)));
+      const seats = matchedGroupSeats ?? matchedPackageSeats;
+
+      if (seats !== undefined) {
+        setEditRemainingSeats(Number(seats));
+      }
+    } catch (error) {
+      console.error("Error fetching remaining group ticket seats:", error);
+    }
+  };
+
   const handleOpenEditModal = (booking) => {
+    const passengers = JSON.parse(
+      JSON.stringify(booking.metadata?.passengers || booking.passengers || []),
+    ).map(normalizePassengerForEdit);
+    const roomType = normalizeRoomType(booking.metadata?.roomType) || "sharing";
+    const pricePerPerson = getRoomPrice(roomType, booking);
+
     setSelectedBooking(booking);
     setEditForm({
-      passengers: JSON.parse(JSON.stringify(booking.passengers || [])),
-      specialRequests: booking.specialRequests || "",
+      passengers,
+      roomType,
+      pricePerPerson,
+      totalPrice:
+        calculateEditTotal(passengers, roomType, booking) ||
+        booking.metadata?.totalPrice ||
+        0,
+      specialRequests:
+        booking.metadata?.specialRequests || booking.specialRequests || "",
     });
+    setEditRemainingSeats(null);
     setShowEditModal(true);
+    fetchRemainingSeatsForEdit(booking);
   };
 
   const handleCloseEditModal = () => {
     setShowEditModal(false);
     setSelectedBooking(null);
-    setEditForm({ passengers: [], specialRequests: "" });
+    setEditForm({
+      passengers: [],
+      roomType: "",
+      pricePerPerson: 0,
+      totalPrice: 0,
+      specialRequests: "",
+    });
+    setPassportFiles({});
+    setEditRemainingSeats(null);
+    handleCloseMrzModal();
   };
 
   const handlePassengerChange = (index, field, value) => {
     const updatedPassengers = [...editForm.passengers];
     updatedPassengers[index][field] = value;
-    setEditForm({ ...editForm, passengers: updatedPassengers });
-  };
 
-  const handleAddPassenger = () => {
+    if (field === "type" && value !== "Infant") {
+      const limitError = getEditLimitError(updatedPassengers, editForm.roomType);
+      if (limitError) {
+        toast.warning(limitError);
+        return;
+      }
+    }
+
     setEditForm({
       ...editForm,
-      passengers: [
-        ...editForm.passengers,
-        {
-          type: "Adult",
-          title: "Mr",
+      passengers: updatedPassengers,
+      totalPrice: calculateEditTotal(updatedPassengers, editForm.roomType),
+    });
+  };
+
+  const handleEditRoomTypeChange = (roomType) => {
+    const normalizedRoom = normalizeRoomType(roomType);
+    const limitError = getEditLimitError(editForm.passengers, normalizedRoom, {
+      ignoreAdultMaximum: true,
+    });
+    if (limitError) {
+      toast.warning(limitError);
+      return;
+    }
+
+    setEditForm({
+      ...editForm,
+      roomType: normalizedRoom,
+      pricePerPerson: getRoomPrice(normalizedRoom),
+      totalPrice: calculateEditTotal(editForm.passengers, normalizedRoom),
+    });
+
+    const counts = getEditPassengerCounts(editForm.passengers);
+    const adultLimit = getAdultLimit(normalizedRoom);
+    if (adultLimit !== null && counts.adults > adultLimit) {
+      toast.warning(
+        `${normalizedRoom} room allows ${adultLimit} adult${adultLimit > 1 ? "s" : ""}. Remove ${counts.adults - adultLimit} extra adult${counts.adults - adultLimit > 1 ? "s" : ""} before saving.`,
+      );
+    }
+  };
+
+  const handleAddPassenger = (type = "Adult") => {
+    const nextPassenger =
+      type === "Infant"
+        ? {
+          type: "Infant",
+          title: "INF",
           givenName: "",
           surName: "",
           passport: "",
           dateOfBirth: "",
           passportExpiry: "",
           nationality: "Pakistan",
-        },
-      ],
+        }
+        : type === "Child"
+          ? {
+            type: "Child",
+            title: "Child",
+            givenName: "",
+            surName: "",
+            passport: "",
+            dateOfBirth: "",
+            passportExpiry: "",
+            nationality: "Pakistan",
+          }
+          : {
+            type: "Adult",
+            title: "Mr",
+            givenName: "",
+            surName: "",
+            passport: "",
+            dateOfBirth: "",
+            passportExpiry: "",
+            nationality: "Pakistan",
+          };
+    const nextPassengers = [...editForm.passengers, nextPassenger];
+    const limitError = getEditLimitError(nextPassengers, editForm.roomType);
+
+    if (type !== "Infant" && limitError) {
+      toast.warning(limitError);
+      return;
+    }
+
+    setEditForm({
+      ...editForm,
+      passengers: nextPassengers,
+      totalPrice: calculateEditTotal(nextPassengers, editForm.roomType),
     });
   };
 
   const handleRemovePassenger = (index) => {
-    if (editForm.passengers.length > 1) {
-      const updatedPassengers = editForm.passengers.filter(
-        (_, i) => i !== index,
-      );
-      setEditForm({ ...editForm, passengers: updatedPassengers });
+    const passenger = editForm.passengers[index];
+    if (!canRemovePassenger(passenger)) {
+      const requiredAdults = getRequiredAdultCount(editForm.roomType);
+      if (requiredAdults !== null && passenger?.type === "Adult") {
+        toast.warning(
+          `${editForm.roomType} room requires ${requiredAdults} adult${requiredAdults > 1 ? "s" : ""}`,
+        );
+      }
+      return;
     }
+
+    const updatedPassengers = editForm.passengers.filter(
+      (_, i) => i !== index,
+    );
+    setEditForm({
+      ...editForm,
+      passengers: updatedPassengers,
+      totalPrice: calculateEditTotal(updatedPassengers, editForm.roomType),
+    });
   };
 
   const handleUpdateBooking = async (e) => {
     e.preventDefault();
     try {
       setIsUpdating(true);
-      const updateData = {
-        passengers: editForm.passengers,
-        specialRequests: editForm.specialRequests,
+
+      if (!canEditBooking(selectedBooking)) {
+        toast.error("Only pending bookings can be edited");
+        return;
+      }
+
+      const limitError = getEditLimitError(editForm.passengers, editForm.roomType, {
+        requireMinimumAdults: true,
+      });
+      if (limitError) {
+        toast.error(`${limitError} Infants do not count toward seats.`);
+        return;
+      }
+
+      const sixMonthsFromNow = new Date();
+      sixMonthsFromNow.setMonth(sixMonthsFromNow.getMonth() + 6);
+      const invalidExpiryIndex = editForm.passengers.findIndex((p) => {
+        if (!p.passportExpiry) return false;
+        return new Date(p.passportExpiry) <= sixMonthsFromNow;
+      });
+      if (invalidExpiryIndex !== -1) {
+        toast.error(
+          `Passport expiry for passenger ${invalidExpiryIndex + 1} must be more than 6 months from today`,
+        );
+        return;
+      }
+
+      const selectedRoomPrice = getRoomPrice(editForm.roomType);
+      if (!selectedRoomPrice) {
+        toast.error("Please select an available room type");
+        return;
+      }
+
+      const missingPassportDocIndex = editForm.passengers.findIndex(
+        (passenger, index) => !passenger.documentUrl && !passportFiles[index],
+      );
+      if (missingPassportDocIndex !== -1) {
+        toast.error(
+          `Please upload passport document for passenger ${missingPassportDocIndex + 1}`,
+        );
+        return;
+      }
+
+      // Upload any pending passport files and attach URLs to passengers
+      const passengersWithDocs = await Promise.all(
+        editForm.passengers.map(async (passenger, idx) => {
+          const file = passportFiles[idx];
+          if (!file) return passenger;
+          const fd = new FormData();
+          fd.append("file", file);
+          try {
+            const res = await axiosInstance.post(
+              "/zip-accounts/upload-receipt",
+              fd,
+              { headers: { "Content-Type": "multipart/form-data" } },
+            );
+            return { ...passenger, documentUrl: res.data?.url || passenger.documentUrl };
+          } catch (err) {
+            console.error(`Passport upload failed for passenger ${idx}:`, err);
+            return passenger;
+          }
+        }),
+      );
+
+      const updatedPassengers = passengersWithDocs.map((passenger) => ({
+        ...passenger,
+        name:
+          `${passenger.givenName || ""} ${passenger.surName || ""}`.trim() ||
+          passenger.name ||
+          "",
+        dob: passenger.dateOfBirth || passenger.dob || "",
+      }));
+      const updatedTotalPrice = calculateEditTotal(
+        updatedPassengers,
+        editForm.roomType,
+      );
+
+      const payload = {
+        type: selectedBooking.type,
+        bookingAgainst: selectedBooking.bookingAgainst || null,
+        status: selectedBooking.status,
+        payments: selectedBooking.payments || [],
+        metadata: {
+          ...selectedBooking.metadata,
+          roomType: editForm.roomType,
+          pricePerPerson: selectedRoomPrice,
+          totalPrice: updatedTotalPrice,
+          passengers: updatedPassengers,
+          totalPassengers: updatedPassengers.length,
+          specialRequests: editForm.specialRequests,
+        },
+        created_by: selectedBooking.created_by || null,
       };
-      await updateUmrahBooking(selectedBooking._id, updateData);
+      await axiosInstance.put(
+        `/zip-accounts/update-booking/${selectedBooking._id}`,
+        payload,
+      );
       toast.success("Booking updated successfully!");
       handleCloseEditModal();
       fetchBookings();
@@ -164,46 +812,100 @@ export default function UmrahBooking() {
   };
 
   const canEditBooking = (booking) => {
-    return !booking.paymentStatus?.paymentHistory?.length > 0;
+    return booking?.status?.toString().toLowerCase().trim() === "pending";
+  };
+
+  // Helpers for ZIP payments array — payments live in metadata.payments
+  const getPayments = (booking) =>
+    booking.metadata?.payments || booking.payments || [];
+
+  const getApprovedPaidAmount = (booking) =>
+    getPayments(booking)
+      .filter((p) => p.status === "approved")
+      .reduce((sum, p) => sum + (p.amount || 0), 0);
+
+  // Pending = under review (not yet approved/rejected)
+  const getPendingAmount = (booking) =>
+    getPayments(booking)
+      .filter((p) => p.status === "pending")
+      .reduce((sum, p) => sum + (p.amount || 0), 0);
+
+  // Available = total minus approved AND pending (prevents over-submission)
+  const getRemainingAmount = (booking) => {
+    const total = booking.metadata?.totalPrice || 0;
+    const committed = getApprovedPaidAmount(booking) + getPendingAmount(booking);
+    return Math.max(0, total - committed);
   };
 
   const handleSubmitPayment = async (e) => {
     e.preventDefault();
-    if (!receiptFile) {
-      toast.error("Please upload a receipt");
-      return;
-    }
 
-    // Calculate remaining amount
-    const totalAmount = selectedBooking.pricing?.totalPrice || 0;
-    const paidAmount = selectedBooking.paymentStatus?.paidAmount || 0;
-    const remainingAmount = totalAmount - paidAmount;
+    const remaining = getRemainingAmount(selectedBooking);
     const submittingAmount = parseFloat(paymentForm.amount);
 
-    // Validate: Amount must not exceed remaining amount
-    if (submittingAmount > remainingAmount) {
+    if (submittingAmount < 1) {
+      toast.error("Amount must be at least 1");
+      return;
+    }
+    if (remaining <= 0) {
       toast.error(
-        `Amount cannot exceed remaining balance of PKR ${remainingAmount.toLocaleString()}`,
+        "This booking already has payments covering the full amount. No further payment can be submitted.",
       );
       return;
     }
-
-    // Validate: Amount must be at least 1
-    if (submittingAmount < 1) {
-      toast.error("Amount must be at least PKR 1");
+    if (submittingAmount > remaining) {
+      toast.error(
+        `Amount cannot exceed the available balance of ${selectedBooking.metadata?.currency || "PKR"} ${remaining.toLocaleString()} (approved + pending payments already cover the rest)`,
+      );
       return;
     }
 
     try {
       setSubmittingPayment(true);
-      const formData = new FormData();
-      formData.append("amount", paymentForm.amount);
-      formData.append("method", paymentForm.method);
-      formData.append("receiptNumber", paymentForm.receiptNumber);
-      formData.append("notes", paymentForm.notes);
-      formData.append("receiptFile", receiptFile);
 
-      await submitPayment(selectedBooking._id, formData);
+      // Upload receipt to cloudinary if provided
+      let receiptImageUrl = "";
+      if (receiptFile) {
+        const uploadData = new FormData();
+        uploadData.append("file", receiptFile);
+        const uploadRes = await axiosInstance.post(
+          "/zip-accounts/upload-receipt",
+          uploadData,
+          {
+            headers: { "Content-Type": "multipart/form-data" },
+          },
+        );
+        receiptImageUrl = uploadRes.data?.url || "";
+      }
+
+      // Build new payment entry matching ZIP payment schema
+      const newPayment = {
+        amount: submittingAmount,
+        currency: selectedBooking.metadata?.currency || "",
+        method: paymentForm.method,
+        transactionRef: paymentForm.receiptNumber || "",
+        receiptImage: receiptImageUrl,
+        status: "pending",
+        note: paymentForm.notes || "",
+        submittedAt: new Date().toISOString(),
+      };
+
+      // Merge with existing payments (stored in metadata.payments)
+      const updatedPayments = [...getPayments(selectedBooking), newPayment];
+
+      // Build full booking payload for PUT
+      const payload = {
+        type: selectedBooking.type,
+        bookingAgainst: selectedBooking.bookingAgainst || null,
+        metadata: { ...selectedBooking.metadata, payments: updatedPayments },
+        created_by: selectedBooking.created_by || null,
+      };
+
+      await axiosInstance.put(
+        `/zip-accounts/update-booking/${selectedBooking._id}`,
+        payload,
+      );
+
       toast.success(
         "Payment submitted successfully! Waiting for admin review.",
       );
@@ -217,37 +919,77 @@ export default function UmrahBooking() {
     }
   };
 
+  const calculateRemainingTime = (expiresAt) => {
+    if (!expiresAt) return { hours: 0, minutes: 0, seconds: 0, expired: true };
+    const diff = new Date(expiresAt) - new Date();
+    if (diff <= 0) return { hours: 0, minutes: 0, seconds: 0, expired: true };
+    return {
+      hours: Math.floor(diff / (1000 * 60 * 60)),
+      minutes: Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60)),
+      seconds: Math.floor((diff % (1000 * 60)) / 1000),
+      expired: false,
+    };
+  };
+
+  const formatExpiryTime = (expiresAt) => {
+    if (!expiresAt) return "";
+
+    const expiryDate = new Date(expiresAt);
+    if (Number.isNaN(expiryDate.getTime())) return "";
+
+    return expiryDate.toLocaleTimeString("en-US", {
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: true,
+    });
+  };
+
+  useEffect(() => {
+    const pendingWithExpiry = bookings.filter(
+      (b) => b.type === "UmrahPackage" && b.status === "pending" && b.expiresAt,
+    );
+    if (pendingWithExpiry.length === 0) return;
+    const interval = setInterval(() => {
+      const newTimers = {};
+      pendingWithExpiry.forEach((booking) => {
+        newTimers[booking._id] = calculateRemainingTime(booking.expiresAt);
+      });
+      setTimers(newTimers);
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [bookings]);
+
   useEffect(() => {
     fetchBookings();
   }, []);
 
   // Filter and Search Logic
   const filteredAndSortedBookings = useMemo(() => {
-    let result = [...bookings];
+    // Filter only UmrahPackage type bookings
+    let result = bookings.filter((booking) => booking.type === "UmrahPackage");
 
     if (searchTerm) {
       const term = searchTerm.toLowerCase();
       result = result.filter((booking) => {
-        const passengerName = `${booking.passengers?.[0]?.givenName || ""} ${
-          booking.passengers?.[0]?.surName || ""
-        }`.toLowerCase();
+        const passengerName =
+          `${booking.metadata?.passengers?.[0]?.name || ""}`.toLowerCase();
 
         return (
-          booking.bookingNumber?.toLowerCase().includes(term) ||
-          booking.packageName?.toLowerCase().includes(term) ||
+          booking.bookingId?.toLowerCase().includes(term) ||
+          booking.metadata?.packageName?.toLowerCase().includes(term) ||
           passengerName.includes(term)
         );
       });
     }
 
     if (statusFilter !== "All") {
-      result = result.filter((b) => b.overallStatus === statusFilter);
+      result = result.filter((b) => b.status === statusFilter);
     }
     if (paymentFilter !== "All") {
       result = result.filter((b) => b.paymentStatus?.status === paymentFilter);
     }
     if (visaFilter !== "All") {
-      result = result.filter((b) => b.visaStatus?.status === visaFilter);
+      result = result.filter((b) => getVisaLabel(b) === visaFilter);
     }
     if (hotelFilter !== "All") {
       result = result.filter((b) => b.hotelStatus?.status === hotelFilter);
@@ -259,23 +1001,25 @@ export default function UmrahBooking() {
 
         switch (sortConfig.key) {
           case "bookingNumber":
-            valA = a.bookingNumber || "";
-            valB = b.bookingNumber || "";
+            valA = a.bookingId || "";
+            valB = b.bookingId || "";
             break;
           case "packageName":
-            valA = a.packageName || "";
-            valB = b.packageName || "";
+            valA = a.metadata?.packageName || "";
+            valB = b.metadata?.packageName || "";
             break;
           case "totalPrice":
-            valA = a.pricing?.totalPrice || 0;
-            valB = b.pricing?.totalPrice || 0;
+            valA = a.metadata?.totalPrice || 0;
+            valB = b.metadata?.totalPrice || 0;
             break;
           case "overallStatus":
-            valA = a.overallStatus || "";
-            valB = b.overallStatus || "";
+            valA = a.status || "";
+            valB = b.status || "";
             break;
-          default:
-            return 0;
+          case "createdAt":
+            valA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+            valB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+            break;
         }
 
         if (valA < valB) return sortConfig.direction === "asc" ? -1 : 1;
@@ -315,27 +1059,84 @@ export default function UmrahBooking() {
     setSortConfig({ key: null, direction: "asc" });
   };
 
+  // Filter only UmrahPackage bookings for stats and options
+  const umrahBookings = bookings.filter((b) => b.type === "UmrahPackage");
+
+  const VISA_LABEL_MAP = {
+    not_applied: "Pending",
+    submitted: "Applied",
+    approved: "Approved",
+    rejected: "Rejected",
+    cancelled: "Cancelled",
+    send_to_embassy: "Send to Embassy",
+  };
+
+  const getVisaRawKey = (booking) =>
+    booking.metadata?.visaStatus ||
+    (booking.visaStatus?.status
+      ? booking.visaStatus.status.toLowerCase().replace(/ /g, "_")
+      : null);
+
+  const getVisaLabel = (booking) => {
+    const raw = getVisaRawKey(booking);
+    return raw ? VISA_LABEL_MAP[raw] || raw : null;
+  };
+
+  const getVisaColorClass = (rawKey) => {
+    switch (rawKey) {
+      case "approved": return "bg-blue-50 text-blue-700";
+      case "submitted": return "bg-amber-50 text-amber-700";
+      case "rejected": return "bg-red-50 text-red-700";
+      case "cancelled": return "bg-red-50 text-red-700";
+      case "send_to_embassy": return "bg-purple-50 text-purple-700";
+      default: return "bg-gray-100 text-gray-500";
+    }
+  };
+
   const statusOptions = [
     "All",
-    ...new Set(bookings.map((b) => b.overallStatus).filter(Boolean)),
+    ...new Set(umrahBookings.map((b) => b.status).filter(Boolean)),
   ];
   const paymentOptions = [
     "All",
-    ...new Set(bookings.map((b) => b.paymentStatus?.status).filter(Boolean)),
+    ...new Set(
+      umrahBookings.map((b) => b.paymentStatus?.status).filter(Boolean),
+    ),
   ];
   const visaOptions = [
     "All",
-    ...new Set(bookings.map((b) => b.visaStatus?.status).filter(Boolean)),
+    ...new Set(umrahBookings.map((b) => getVisaLabel(b)).filter(Boolean)),
   ];
   const hotelOptions = [
     "All",
-    ...new Set(bookings.map((b) => b.hotelStatus?.status).filter(Boolean)),
+    ...new Set(umrahBookings.map((b) => b.hotelStatus?.status).filter(Boolean)),
   ];
 
-  const totalBookings = bookings.length;
-  const totalSpent = bookings.reduce(
-    (sum, b) => sum + (b.pricing?.totalPrice || 0),
+  const visibleUmrahBookings = umrahBookings.filter((booking) => {
+    const status = booking?.status?.toString().toLowerCase().trim();
+    return status === "confirmed" || status === "pending";
+  });
+
+  const totalBookings = umrahBookings.length;
+  const totalSpent = visibleUmrahBookings.reduce(
+    (sum, b) => sum + (b.metadata?.totalPrice || 0),
     0,
+  );
+  const bookingStatusCounts = umrahBookings.reduce(
+    (acc, booking) => {
+      const status = booking?.status?.toString().toLowerCase().trim();
+
+      if (["confirmed", "completed", "paid"].includes(status)) {
+        acc.confirmed += 1;
+      } else if (["pending", "on hold", "in progress"].includes(status)) {
+        acc.hold += 1;
+      } else if (["cancelled", "rejected"].includes(status)) {
+        acc.cancelled += 1;
+      }
+
+      return acc;
+    },
+    { confirmed: 0, hold: 0, cancelled: 0 },
   );
 
   if (loading) {
@@ -354,8 +1155,12 @@ export default function UmrahBooking() {
   return (
     <div className="min-h-screen p-6 font-sans">
       <div className="max-w-8xl mx-auto">
+        <TopBar
+          title={"My Umrah Bookings"}
+          icon={<Package className="text-white w-6 h-6" />}
+        />
         {/* Header */}
-        <div className="flex flex-col md:flex-row md:items-center justify-between mb-8">
+        {/* <div className="flex flex-col md:flex-row md:items-center justify-between mb-8">
           <div>
             <h1 className="text-3xl font-bold text-gray-900 tracking-tight">
               My Umrah Bookings
@@ -371,10 +1176,10 @@ export default function UmrahBooking() {
             <RefreshCw className="w-4 h-4 text-emerald-600" />
             Refresh
           </button>
-        </div>
+        </div> */}
 
         {/* Stats Cards */}
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-6 mb-8">
+        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-5 gap-6 mb-8">
           <div className="bg-white rounded-2xl p-6 shadow-sm border border-gray-100">
             <p className="text-sm font-medium text-gray-500">Total Bookings</p>
             <p className="text-3xl font-bold text-gray-900 mt-1">
@@ -382,21 +1187,27 @@ export default function UmrahBooking() {
             </p>
           </div>
           <div className="bg-white rounded-2xl p-6 shadow-sm border border-gray-100">
-            <p className="text-sm font-medium text-gray-500">Total Spent</p>
-            <p className="text-3xl font-bold text-emerald-600 mt-1">
+            <p className="text-sm font-medium text-gray-500">Total Business Payment</p>
+            <p className="text-3xl font-bold text-blue-600 mt-1">
               PKR {totalSpent.toLocaleString()}
             </p>
           </div>
           <div className="bg-white rounded-2xl p-6 shadow-sm border border-gray-100">
-            <p className="text-sm font-medium text-gray-500">Active Bookings</p>
+            <p className="text-sm font-medium text-gray-500">On Hold</p>
             <p className="text-3xl font-bold text-amber-600 mt-1">
-              {
-                bookings.filter(
-                  (b) =>
-                    b.overallStatus === "Confirmed" ||
-                    b.overallStatus === "Pending",
-                ).length
-              }
+              {bookingStatusCounts.hold}
+            </p>
+          </div>
+          <div className="bg-white rounded-2xl p-6 shadow-sm border border-gray-100">
+            <p className="text-sm font-medium text-gray-500">Confirmed</p>
+            <p className="text-3xl font-bold text-emerald-600 mt-1">
+              {bookingStatusCounts.confirmed}
+            </p>
+          </div>
+          <div className="bg-white rounded-2xl p-6 shadow-sm border border-gray-100">
+            <p className="text-sm font-medium text-gray-500">Cancelled</p>
+            <p className="text-3xl font-bold text-rose-600 mt-1">
+              {bookingStatusCounts.cancelled}
             </p>
           </div>
         </div>
@@ -491,6 +1302,19 @@ export default function UmrahBooking() {
                   </th>
 
                   <th
+                    onClick={() => handleSort("createdAt")}
+                    className="px-4 py-3 text-left font-semibold text-gray-600 cursor-pointer hover:text-emerald-600"
+                  >
+                    Date{" "}
+                    {sortConfig.key === "createdAt" &&
+                      (sortConfig.direction === "asc" ? "↑" : "↓")}
+                  </th>
+
+                  {/* <th className="px-4 py-3 text-left font-semibold text-gray-600">
+                    Expires
+                  </th> */}
+
+                  <th
                     onClick={() => handleSort("packageName")}
                     className="px-4 py-3 text-left font-semibold text-gray-600 cursor-pointer hover:text-emerald-600"
                   >
@@ -521,9 +1345,9 @@ export default function UmrahBooking() {
                   <th className="px-4 py-3 text-left font-semibold text-gray-600">
                     Visa
                   </th>
-                  <th className="px-4 py-3 text-left font-semibold text-gray-600">
+                  {/* <th className="px-4 py-3 text-left font-semibold text-gray-600">
                     Hotel
-                  </th>
+                  </th> */}
 
                   <th className="px-4 py-3 text-center font-semibold text-gray-600">
                     Action
@@ -541,117 +1365,210 @@ export default function UmrahBooking() {
                       className="hover:bg-gray-50/80 transition-colors cursor-pointer"
                     >
                       <td className="px-4 py-3 font-mono text-gray-900 whitespace-nowrap">
-                        {booking.bookingNumber}
+                        {booking.bookingId}
                       </td>
+
+                      <td className="px-4 py-3 text-sm text-gray-600 whitespace-nowrap">
+                        {booking.createdAt
+                          ? new Date(booking.createdAt).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" })
+                          : "—"}
+                      </td>
+
+                      {/* <td className="px-4 py-3 text-sm whitespace-nowrap">
+                        
+                      </td> */}
 
                       <td className="px-4 py-3 whitespace-nowrap">
                         <div className="flex items-center gap-2">
                           <span className="font-medium text-gray-900 truncate max-w-35">
-                            {booking.packageName}
+                            {booking.metadata?.packageName}
                           </span>
-                          {booking.packageSource === "zip-accounts" && (
-                            <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-blue-50 text-blue-600 border border-blue-100">
-                              ZIP
-                            </span>
-                          )}
+                          {booking.metadata?.packageSource ===
+                            "zip-accounts" && (
+                              <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-blue-50 text-blue-600 border border-blue-100">
+                                ZIP
+                              </span>
+                            )}
                         </div>
                       </td>
 
                       <td className="px-4 py-3 whitespace-nowrap">
                         <div className="font-medium text-gray-900">
-                          {booking.passengers?.[0]?.givenName}{" "}
-                          {booking.passengers?.[0]?.surName}
+                          {booking.metadata?.passengers?.[0]?.name}
                         </div>
                         <div className="text-[10px] text-gray-400">
-                          {booking.passengerCount?.total}
+                          {booking.metadata?.totalPassengers} pax
                         </div>
                       </td>
 
                       <td className="px-4 py-3 font-semibold text-gray-900 whitespace-nowrap">
-                        {booking.pricing?.currency}{" "}
-                        {booking.pricing?.totalPrice?.toLocaleString()}
+                        {booking.metadata?.currency}{" "}
+                        {booking.metadata?.totalPrice?.toLocaleString()}
                       </td>
 
                       {/* Booking Status */}
                       <td className="px-4 py-3 whitespace-nowrap">
-                        <span className="px-2 py-0.5 rounded-full bg-gray-100 text-gray-600 text-xs font-medium">
-                          {booking.overallStatus}
+                        <span
+                          className={`px-2 py-0.5 rounded-full text-xs font-medium capitalize ${booking.status === "confirmed"
+                              ? "bg-emerald-50 text-emerald-700"
+                              : booking.status === "pending"
+                                ? "bg-amber-50 text-amber-700"
+                                : booking.status === "cancelled"
+                                  ? "bg-red-50 text-red-700"
+                                  : "bg-gray-100 text-gray-600"
+                            }`}
+                        >
+                          {booking.status}
                         </span>
                       </td>
 
                       {/* Payment Status */}
                       <td className="px-4 py-3 whitespace-nowrap">
                         <div className="flex flex-col gap-1">
-                          <span
-                            className={`px-2 py-0.5 rounded-full text-xs font-medium ${
-                              booking.paymentStatus?.status === "Paid"
-                                ? "bg-emerald-50 text-emerald-700"
-                                : booking.paymentStatus?.status === "Pending" &&
-                                    booking.paymentStatus?.paymentHistory
-                                      ?.length > 0
-                                  ? "bg-blue-50 text-blue-700"
-                                  : booking.paymentStatus?.status === "Pending"
-                                    ? "bg-amber-50 text-amber-700"
-                                    : "bg-red-50 text-red-700"
-                            }`}
-                          >
-                            {booking.paymentStatus?.status === "Pending" &&
-                            booking.paymentStatus?.paymentHistory?.length > 0
-                              ? "Review"
-                              : booking.paymentStatus?.status || "N/A"}
-                          </span>
-                          {booking.paymentStatus?.paymentHistory?.some(
-                            (p) => p.paymentStatus === "Rejected",
-                          ) && (
-                            <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-red-100 text-red-700 border border-red-300">
-                              {
-                                booking.paymentStatus.paymentHistory.filter(
-                                  (p) => p.paymentStatus === "Rejected",
-                                ).length
-                              }{" "}
-                              Rejected
-                            </span>
-                          )}
+                          {(() => {
+                            const payments = booking.metadata?.payments || booking.payments || [];
+                            const total = booking.metadata?.totalPrice || 0;
+                            const approved = payments
+                              .filter((p) => p.status === "approved")
+                              .reduce((s, p) => s + (p.amount || 0), 0);
+                            const hasPending = payments.some(
+                              (p) => p.status === "pending",
+                            );
+                            const hasRejected = payments.some(
+                              (p) => p.status === "rejected",
+                            );
+                            const isFullyPaid = total > 0 && approved >= total;
+                            return (
+                              <>
+                                <span
+                                  className={`px-2 py-0.5 rounded-full text-xs font-medium ${isFullyPaid
+                                      ? "bg-emerald-50 text-emerald-700"
+                                      : hasPending
+                                        ? "bg-blue-50 text-blue-700"
+                                        : approved > 0
+                                          ? "bg-amber-50 text-amber-700"
+                                          : "bg-gray-100 text-gray-600"
+                                    }`}
+                                >
+                                  {isFullyPaid
+                                    ? "Paid"
+                                    : hasPending
+                                      ? "Pending Review"
+                                      : approved > 0
+                                        ? "Partial"
+                                        : "Unpaid"}
+                                </span>
+                                {hasRejected && (
+                                  <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-red-100 text-red-700 border border-red-300">
+                                    {
+                                      payments.filter(
+                                        (p) => p.status === "rejected",
+                                      ).length
+                                    }{" "}
+                                    Rejected
+                                  </span>
+                                )}
+                              </>
+                            );
+                          })()}
                         </div>
                       </td>
 
                       {/* Visa */}
                       <td className="px-4 py-3 whitespace-nowrap">
                         <span
-                          className={`px-2 py-0.5 rounded-full text-xs font-medium ${
-                            booking.visaStatus?.status === "Approved"
-                              ? "bg-blue-50 text-blue-700"
-                              : booking.visaStatus?.status === "Pending"
-                                ? "bg-amber-50 text-amber-700"
-                                : booking.visaStatus?.status === "Rejected"
-                                  ? "bg-red-50 text-red-700"
-                                  : "bg-gray-50 text-gray-600"
-                          }`}
+                          className={`px-2 py-0.5 rounded-full text-xs font-medium ${getVisaColorClass(getVisaRawKey(booking))}`}
                         >
-                          {booking.visaStatus?.status || "N/A"}
+                          {getVisaLabel(booking) || "N/A"}
                         </span>
                       </td>
 
                       {/* Hotel */}
-                      <td className="px-4 py-3 whitespace-nowrap">
+                      {/* <td className="px-4 py-3 whitespace-nowrap">
                         <span
-                          className={`px-2 py-0.5 rounded-full text-xs font-medium ${
-                            booking.hotelStatus?.status === "Confirmed"
+                          className={`px-2 py-0.5 rounded-full text-xs font-medium ${booking.hotelStatus?.status === "Confirmed"
                               ? "bg-purple-50 text-purple-700"
                               : booking.hotelStatus?.status === "Pending"
                                 ? "bg-amber-50 text-amber-700"
                                 : booking.hotelStatus?.status === "Cancelled"
                                   ? "bg-red-50 text-red-700"
                                   : "bg-gray-50 text-gray-600"
-                          }`}
+                            }`}
                         >
                           {booking.hotelStatus?.status || "N/A"}
                         </span>
-                      </td>
+                      </td> */}
 
                       {/* Action */}
-                      <td className="px-4 py-3 text-center whitespace-nowrap">
+                      <td className="px-4 py-3 text-center whitespace-nowrap flex items-center justify-center flex-col">
+                        <div className="pb-2">{booking.expiresAt && booking.status === "pending" ? (
+                          (() => {
+                            const timer = timers[booking._id] || calculateRemainingTime(booking.expiresAt);
+                            if (timer.expired) {
+                              const expiryTime = formatExpiryTime(booking.expiresAt);
+                              return (
+                                <span className="px-2 py-1 rounded-md text-[10px] font-bold bg-red-50 text-red-700 border border-red-200">
+                                  Auto cancelled{expiryTime ? ` at ${expiryTime}` : ""}
+                                </span>
+                              );
+                            }
+
+                            return (
+                              <div className="flex items-center gap-1">
+                                <div className="bg-rose-500 text-white px-2 py-1 rounded-md shadow-sm text-center min-w-9">
+                                  <div className="text-sm font-bold leading-none">{String(timer.hours).padStart(2, "0")}</div>
+                                  <div className="text-[8px] font-medium mt-0.5 opacity-90">HRS</div>
+                                </div>
+                                <div className="bg-amber-500 text-white px-2 py-1 rounded-md shadow-sm text-center min-w-9">
+                                  <div className="text-sm font-bold leading-none">{String(timer.minutes).padStart(2, "0")}</div>
+                                  <div className="text-[8px] font-medium mt-0.5 opacity-90">MIN</div>
+                                </div>
+                                <div className="bg-indigo-500 text-white px-2 py-1 rounded-md shadow-sm text-center min-w-9">
+                                  <div className="text-sm font-bold leading-none">{String(timer.seconds).padStart(2, "0")}</div>
+                                  <div className="text-[8px] font-medium mt-0.5 opacity-90">SEC</div>
+                                </div>
+                              </div>
+                            );
+                          })()
+                        ) : null}</div>
                         <div className="flex items-center justify-center gap-2">
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              printGDSBooking(booking);
+                            }}
+                            className="p-2.5 text-slate-600 bg-slate-100 hover:bg-slate-200 hover:text-slate-700 rounded-lg transition-all shadow-sm hover:shadow-md border border-slate-200 cursor-pointer"
+                            title="Print Ticket"
+                          >
+                            <svg
+                              className="w-4 h-4"
+                              fill="none"
+                              stroke="currentColor"
+                              viewBox="0 0 24 24"
+                            >
+                              <path
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                                strokeWidth={2}
+                                d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z"
+                              />
+                            </svg>
+                          </button>
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handlePrintVoucher(booking);
+                            }}
+                            disabled={printingVoucherId === booking._id}
+                            className="p-2.5 text-emerald-600 bg-emerald-50 hover:bg-emerald-100 hover:text-emerald-700 rounded-lg transition-all shadow-sm hover:shadow-md border border-emerald-200 cursor-pointer disabled:opacity-60 disabled:cursor-wait"
+                            title="Open Voucher"
+                          >
+                            {printingVoucherId === booking._id ? (
+                              <RefreshCw className="w-4 h-4 animate-spin" />
+                            ) : (
+                              <FileCheck className="w-4 h-4" />
+                            )}
+                          </button>
                           {canEditBooking(booking) ? (
                             <button
                               onClick={(e) => {
@@ -668,32 +1585,40 @@ export default function UmrahBooking() {
                             <button
                               disabled
                               className="inline-flex items-center gap-1 px-3 py-1.5 bg-gray-100 text-gray-400 rounded-md text-xs font-medium whitespace-nowrap cursor-not-allowed"
-                              title="Cannot edit after payment submission"
+                              title="Only pending bookings can be edited"
                             >
                               <Edit2 className="w-3 h-3" />
                               Edit
                             </button>
                           )}
-                          {booking.paymentStatus?.status === "Paid" ? (
-                            <button
-                              disabled
-                              className="inline-flex items-center gap-1 px-3 py-1.5 bg-emerald-100 text-emerald-700 rounded-md text-xs font-medium whitespace-nowrap"
-                            >
-                              <CheckCircle className="w-3 h-3" />
-                              Paid
-                            </button>
-                          ) : (
-                            <button
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                handleOpenPaymentModal(booking);
-                              }}
-                              className="inline-flex items-center gap-1 px-3 py-1.5 bg-emerald-600 text-white rounded-md hover:bg-emerald-700 text-xs font-medium whitespace-nowrap"
-                            >
-                              <Plus className="w-3 h-3" />
-                              Pay
-                            </button>
-                          )}
+                          {(() => {
+                            const payments = booking.metadata?.payments || booking.payments || [];
+                            const total = booking.metadata?.totalPrice || 0;
+                            const approved = payments
+                              .filter((p) => p.status === "approved")
+                              .reduce((s, p) => s + (p.amount || 0), 0);
+                            const isFullyPaid = total > 0 && approved >= total;
+                            return isFullyPaid ? (
+                              <button
+                                disabled
+                                className="inline-flex items-center gap-1 px-3 py-1.5 bg-emerald-100 text-emerald-700 rounded-md text-xs font-medium whitespace-nowrap"
+                              >
+                                <CheckCircle className="w-3 h-3" />
+                                Paid
+                              </button>
+                            ) : (
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleOpenPaymentModal(booking);
+                                }}
+                                className="inline-flex items-center gap-1 px-3 py-1.5 bg-emerald-600 text-white rounded-md hover:bg-emerald-700 text-xs font-medium whitespace-nowrap"
+                              >
+                                <Plus className="w-3 h-3" />
+                                Pay
+                              </button>
+                            );
+                          })()}
                         </div>
                       </td>
                     </tr>
@@ -734,7 +1659,7 @@ export default function UmrahBooking() {
                 <p className="text-gray-500 text-sm mt-1">
                   Ref:{" "}
                   <span className="font-mono font-medium text-emerald-600">
-                    {selectedBooking.bookingNumber}
+                    {selectedBooking.bookingId || selectedBooking.refNo}
                   </span>
                 </p>
               </div>
@@ -747,219 +1672,262 @@ export default function UmrahBooking() {
             </div>
 
             <div className="flex-1 overflow-y-auto px-8 py-4">
-              {/* Amount Display */}
-              <div className="bg-emerald-50 rounded-2xl p-6 mb-6">
-                <div className="grid grid-cols-2 gap-4 text-center">
+              {/* Booking Info Summary */}
+              <div className="bg-gray-50 rounded-2xl p-4 mb-4">
+                <div className="grid grid-cols-2 gap-2 text-sm">
                   <div>
-                    <p className="text-emerald-600 text-xs font-bold uppercase tracking-wider mb-1">
-                      Package Total
+                    <p className="text-gray-500 text-xs font-semibold uppercase">
+                      Booking ID
                     </p>
-                    <p className="text-2xl font-black text-emerald-900">
-                      PKR{" "}
-                      {selectedBooking.pricing?.totalPrice?.toLocaleString()}
+                    <p className="font-mono font-bold text-gray-900">
+                      {selectedBooking.bookingId ||
+                        selectedBooking.refNo ||
+                        "—"}
                     </p>
                   </div>
                   <div>
-                    <p className="text-amber-600 text-xs font-bold uppercase tracking-wider mb-1">
-                      Remaining
+                    <p className="text-gray-500 text-xs font-semibold uppercase">
+                      Package
                     </p>
-                    <p className="text-2xl font-black text-amber-900">
-                      PKR{" "}
-                      {(
-                        (selectedBooking.pricing?.totalPrice || 0) -
-                        (selectedBooking.paymentStatus?.paidAmount || 0)
-                      ).toLocaleString()}
+                    <p className="font-semibold text-gray-900 truncate">
+                      {selectedBooking.metadata?.packageName || "—"}
                     </p>
+                  </div>
+                  <div>
+                    <p className="text-gray-500 text-xs font-semibold uppercase">
+                      Passengers
+                    </p>
+                    <p className="font-semibold text-gray-900">
+                      {selectedBooking.metadata?.totalPassengers || "—"} pax
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-gray-500 text-xs font-semibold uppercase">
+                      Booking Status
+                    </p>
+                    <span
+                      className={`inline-block px-2 py-0.5 rounded-full text-xs font-medium capitalize ${selectedBooking.status === "confirmed"
+                          ? "bg-emerald-50 text-emerald-700"
+                          : selectedBooking.status === "pending"
+                            ? "bg-amber-50 text-amber-700"
+                            : "bg-red-50 text-red-700"
+                        }`}
+                    >
+                      {selectedBooking.status}
+                    </span>
                   </div>
                 </div>
               </div>
 
+              {/* Amount Display */}
+              {(() => {
+                const cur = selectedBooking.metadata?.currency || "PKR";
+                const total = selectedBooking.metadata?.totalPrice || 0;
+                const approved = getApprovedPaidAmount(selectedBooking);
+                const pending = getPendingAmount(selectedBooking);
+                const available = getRemainingAmount(selectedBooking);
+                return (
+                  <div className="bg-emerald-50 rounded-2xl p-4 mb-6">
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-center">
+                      <div>
+                        <p className="text-emerald-700 text-[10px] font-bold uppercase tracking-wider mb-1">
+                          Package Total
+                        </p>
+                        <p className="text-base font-black text-emerald-900">
+                          {cur} {total.toLocaleString()}
+                        </p>
+                      </div>
+                      <div>
+                        <p className="text-blue-600 text-[10px] font-bold uppercase tracking-wider mb-1">
+                          Approved
+                        </p>
+                        <p className="text-base font-black text-blue-900">
+                          {cur} {approved.toLocaleString()}
+                        </p>
+                      </div>
+                      <div>
+                        <p className="text-amber-600 text-[10px] font-bold uppercase tracking-wider mb-1">
+                          Under Review
+                        </p>
+                        <p className="text-base font-black text-amber-900">
+                          {cur} {pending.toLocaleString()}
+                        </p>
+                      </div>
+                      <div className={available <= 0 ? "opacity-60" : ""}>
+                        <p className="text-rose-600 text-[10px] font-bold uppercase tracking-wider mb-1">
+                          Available
+                        </p>
+                        <p className="text-base font-black text-rose-900">
+                          {cur} {available.toLocaleString()}
+                        </p>
+                      </div>
+                    </div>
+                    {available <= 0 && (
+                      <p className="mt-3 text-center text-xs font-semibold text-rose-700 bg-rose-100 rounded-lg py-2">
+                        Full amount is covered by approved / pending payments. No further payment needed.
+                      </p>
+                    )}
+                  </div>
+                );
+              })()}
+
               {/* Payment History - Compact */}
-              {selectedBooking.paymentStatus?.paymentHistory?.length > 0 && (
+              {getPayments(selectedBooking).length > 0 && (
                 <div className="mb-6">
                   <h3 className="text-xs font-bold text-gray-400 uppercase tracking-widest mb-3">
-                    Previous History
+                    Payment History
                   </h3>
                   <div className="space-y-2">
-                    {selectedBooking.paymentStatus.paymentHistory.map(
-                      (payment, idx) => (
-                        <div
-                          key={idx}
-                          className="rounded-xl border border-gray-100 bg-gray-50/50 overflow-hidden"
-                        >
-                          <div className="flex items-center justify-between p-3">
-                            <div className="text-sm flex-1">
-                              <p className="font-bold text-gray-800">
-                                PKR {payment.amount?.toLocaleString()}
+                    {getPayments(selectedBooking).map((payment, idx) => (
+                      <div
+                        key={idx}
+                        className="rounded-xl border border-gray-100 bg-gray-50/50 overflow-hidden"
+                      >
+                        <div className="flex items-center justify-between p-3">
+                          <div className="text-sm flex-1">
+                            <p className="font-bold text-gray-800">
+                              {payment.currency ||
+                                selectedBooking.metadata?.currency ||
+                                "PKR"}{" "}
+                              {payment.amount?.toLocaleString()}
+                            </p>
+                            <p className="text-[10px] text-gray-500">
+                              {payment.submittedAt
+                                ? new Date(
+                                  payment.submittedAt,
+                                ).toLocaleDateString()
+                                : "—"}{" "}
+                              • {payment.method || "—"}
+                              {payment.transactionRef
+                                ? ` • Ref: ${payment.transactionRef}`
+                                : ""}
+                            </p>
+                          </div>
+                          <span
+                            className={`text-[10px] font-bold px-2 py-1 rounded-md ${payment.status === "approved"
+                                ? "bg-emerald-100 text-emerald-700"
+                                : payment.status === "pending"
+                                  ? "bg-blue-100 text-blue-700"
+                                  : payment.status === "rejected"
+                                    ? "bg-red-100 text-red-700"
+                                    : "bg-amber-100 text-amber-700"
+                              }`}
+                          >
+                            {payment.status === "pending"
+                              ? "Pending Review"
+                              : payment.status === "approved"
+                                ? "Approved"
+                                : payment.status === "rejected"
+                                  ? "Rejected"
+                                  : payment.status || "Pending"}
+                          </span>
+                        </div>
+                        {payment.status === "rejected" && payment.note && (
+                          <div className="px-3 pb-3 pt-1">
+                            <div className="bg-red-50 border border-red-200 rounded-lg p-2">
+                              <p className="text-[10px] font-semibold text-red-700 uppercase tracking-wider mb-1">
+                                Note:
                               </p>
-                              <p className="text-[10px] text-gray-500">
-                                {new Date(
-                                  payment.paymentDate,
-                                ).toLocaleDateString()}{" "}
-                                • {payment.method}
+                              <p className="text-xs text-red-800">
+                                {payment.note}
                               </p>
                             </div>
-                            <span
-                              className={`text-[10px] font-bold px-2 py-1 rounded-md ${
-                                payment.paymentStatus === "Approved" ||
-                                payment.paymentStatus === "Received"
-                                  ? "bg-emerald-100 text-emerald-700"
-                                  : payment.paymentStatus === "Pending"
-                                    ? "bg-blue-100 text-blue-700"
-                                    : payment.paymentStatus === "Rejected"
-                                      ? "bg-red-100 text-red-700"
-                                      : "bg-amber-100 text-amber-700"
-                              }`}
-                            >
-                              {payment.paymentStatus === "Pending"
-                                ? "Pending Review"
-                                : payment.paymentStatus === "Received"
-                                  ? "Approved"
-                                  : payment.paymentStatus || "Pending"}
-                            </span>
                           </div>
-                          {payment.paymentStatus === "Rejected" &&
-                            payment.rejectionReason && (
-                              <div className="px-3 pb-3 pt-1">
-                                <div className="bg-red-50 border border-red-200 rounded-lg p-2">
-                                  <p className="text-[10px] font-semibold text-red-700 uppercase tracking-wider mb-1">
-                                    Rejection Reason:
-                                  </p>
-                                  <p className="text-xs text-red-800">
-                                    {payment.rejectionReason}
-                                  </p>
-                                </div>
-                              </div>
-                            )}
-                          {(payment.paymentStatus === "Approved" ||
-                            payment.paymentStatus === "Received") &&
-                            payment.approvalProofFile && (
-                              <div className="px-3 pb-3 pt-1">
-                                <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-2">
-                                  <p className="text-[10px] font-semibold text-emerald-700 uppercase tracking-wider mb-1">
-                                    Approval Proof:
-                                  </p>
-                                  <a
-                                    href={payment.approvalProofFile}
-                                    target="_blank"
-                                    rel="noopener noreferrer"
-                                    className="flex items-center gap-2 text-xs text-emerald-600 hover:text-emerald-800 font-medium"
-                                  >
-                                    <svg
-                                      className="w-4 h-4"
-                                      fill="none"
-                                      stroke="currentColor"
-                                      viewBox="0 0 24 24"
-                                    >
-                                      <path
-                                        strokeLinecap="round"
-                                        strokeLinejoin="round"
-                                        strokeWidth={2}
-                                        d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"
-                                      />
-                                      <path
-                                        strokeLinecap="round"
-                                        strokeLinejoin="round"
-                                        strokeWidth={2}
-                                        d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"
-                                      />
-                                    </svg>
-                                    View Proof Document
-                                  </a>
-                                </div>
-                              </div>
-                            )}
-                        </div>
-                      ),
-                    )}
+                        )}
+                        {payment.receiptImage && (
+                          <div className="px-3 pb-3 pt-1">
+                            <a
+                              href={payment.receiptImage}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="flex items-center gap-2 text-xs text-blue-600 hover:text-blue-800 font-medium"
+                            >
+                              <Upload className="w-3 h-3" />
+                              View Receipt
+                            </a>
+                          </div>
+                        )}
+                      </div>
+                    ))}
                   </div>
                 </div>
               )}
 
               {/* Visa Status Details */}
-              {selectedBooking.visaStatus?.status &&
-                selectedBooking.visaStatus.status !== "Not Applied" && (
-                  <div className="mb-6">
-                    <h3 className="text-xs font-bold text-gray-400 uppercase tracking-widest mb-3">
-                      Visa Status
-                    </h3>
-                    <div className="rounded-xl border border-gray-100 bg-gray-50/50 p-3 space-y-2">
+              {getVisaRawKey(selectedBooking) && getVisaRawKey(selectedBooking) !== "not_applied" && (
+                <div className="mb-6">
+                  <h3 className="text-xs font-bold text-gray-400 uppercase tracking-widest mb-3">
+                    Visa Status
+                  </h3>
+                  <div className="rounded-xl border border-gray-100 bg-gray-50/50 p-3 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs text-gray-600 font-medium">
+                        Status:
+                      </span>
+                      <span className={`px-2 py-1 rounded-full text-xs font-bold ${getVisaColorClass(getVisaRawKey(selectedBooking))}`}>
+                        {getVisaLabel(selectedBooking)}
+                      </span>
+                    </div>
+                    {selectedBooking.visaStatus?.applicationNumber && (
                       <div className="flex items-center justify-between">
                         <span className="text-xs text-gray-600 font-medium">
-                          Status:
+                          Application No:
                         </span>
-                        <span
-                          className={`px-2 py-1 rounded-full text-xs font-bold ${
-                            selectedBooking.visaStatus.status === "Approved"
-                              ? "bg-blue-50 text-blue-700"
-                              : selectedBooking.visaStatus.status === "Rejected"
-                                ? "bg-red-50 text-red-700"
-                                : "bg-amber-50 text-amber-700"
-                          }`}
-                        >
-                          {selectedBooking.visaStatus.status}
+                        <span className="text-xs text-gray-800 font-semibold">
+                          {selectedBooking.visaStatus.applicationNumber}
                         </span>
                       </div>
-                      {selectedBooking.visaStatus.applicationNumber && (
-                        <div className="flex items-center justify-between">
-                          <span className="text-xs text-gray-600 font-medium">
-                            Application No:
-                          </span>
-                          <span className="text-xs text-gray-800 font-semibold">
-                            {selectedBooking.visaStatus.applicationNumber}
-                          </span>
-                        </div>
-                      )}
-                      {selectedBooking.visaStatus.approvalDate && (
-                        <div className="flex items-center justify-between">
-                          <span className="text-xs text-gray-600 font-medium">
-                            Approval Date:
-                          </span>
-                          <span className="text-xs text-gray-800 font-semibold">
-                            {new Date(
-                              selectedBooking.visaStatus.approvalDate,
-                            ).toLocaleDateString()}
-                          </span>
-                        </div>
-                      )}
-                      {selectedBooking.visaStatus.notes && (
-                        <div className="pt-2 border-t border-gray-200">
-                          <p className="text-[10px] font-semibold text-gray-600 uppercase tracking-wider mb-1">
-                            Notes:
-                          </p>
-                          <p className="text-xs text-gray-700">
-                            {selectedBooking.visaStatus.notes}
-                          </p>
-                        </div>
-                      )}
-                      {selectedBooking.visaStatus.approvalDocument && (
-                        <div className="pt-2">
-                          <a
-                            href={selectedBooking.visaStatus.approvalDocument}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="flex items-center gap-2 text-xs text-blue-600 hover:text-blue-800 font-medium"
+                    )}
+                    {selectedBooking.visaStatus?.approvalDate && (
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs text-gray-600 font-medium">
+                          Approval Date:
+                        </span>
+                        <span className="text-xs text-gray-800 font-semibold">
+                          {new Date(
+                            selectedBooking.visaStatus.approvalDate,
+                          ).toLocaleDateString()}
+                        </span>
+                      </div>
+                    )}
+                    {selectedBooking.visaStatus?.notes && (
+                      <div className="pt-2 border-t border-gray-200">
+                        <p className="text-[10px] font-semibold text-gray-600 uppercase tracking-wider mb-1">
+                          Notes:
+                        </p>
+                        <p className="text-xs text-gray-700">
+                          {selectedBooking.visaStatus.notes}
+                        </p>
+                      </div>
+                    )}
+                    {selectedBooking.visaStatus?.approvalDocument && (
+                      <div className="pt-2">
+                        <a
+                          href={selectedBooking.visaStatus.approvalDocument}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="flex items-center gap-2 text-xs text-blue-600 hover:text-blue-800 font-medium"
+                        >
+                          <svg
+                            className="w-4 h-4"
+                            fill="none"
+                            stroke="currentColor"
+                            viewBox="0 0 24 24"
                           >
-                            <svg
-                              className="w-4 h-4"
-                              fill="none"
-                              stroke="currentColor"
-                              viewBox="0 0 24 24"
-                            >
-                              <path
-                                strokeLinecap="round"
-                                strokeLinejoin="round"
-                                strokeWidth={2}
-                                d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
-                              />
-                            </svg>
-                            View Visa Document
-                          </a>
-                        </div>
-                      )}
-                    </div>
+                            <path
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                              strokeWidth={2}
+                              d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
+                            />
+                          </svg>
+                          View Visa Document
+                        </a>
+                      </div>
+                    )}
                   </div>
-                )}
+                </div>
+              )}
 
               {/* Hotel Status Details */}
               {selectedBooking.hotelStatus?.status &&
@@ -974,14 +1942,13 @@ export default function UmrahBooking() {
                           Status:
                         </span>
                         <span
-                          className={`px-2 py-1 rounded-full text-xs font-bold ${
-                            selectedBooking.hotelStatus.status === "Confirmed"
+                          className={`px-2 py-1 rounded-full text-xs font-bold ${selectedBooking.hotelStatus.status === "Confirmed"
                               ? "bg-purple-50 text-purple-700"
                               : selectedBooking.hotelStatus.status ===
-                                  "Cancelled"
+                                "Cancelled"
                                 ? "bg-red-50 text-red-700"
                                 : "bg-amber-50 text-amber-700"
-                          }`}
+                            }`}
                         >
                           {selectedBooking.hotelStatus.status}
                         </span>
@@ -1054,21 +2021,16 @@ export default function UmrahBooking() {
                 <div className="grid grid-cols-2 gap-4">
                   <div className="space-y-1.5">
                     <label className="text-xs font-bold text-gray-700 ml-1">
-                      Amount * (Max: PKR{" "}
-                      {(
-                        (selectedBooking.pricing?.totalPrice || 0) -
-                        (selectedBooking.paymentStatus?.paidAmount || 0)
-                      ).toLocaleString()}
-                      )
+                      Amount * (Max:{" "}
+                      {selectedBooking.metadata?.currency || "PKR"}{" "}
+                      {getRemainingAmount(selectedBooking).toLocaleString()})
                     </label>
                     <input
                       type="number"
                       required
                       min="1"
-                      max={
-                        (selectedBooking.pricing?.totalPrice || 0) -
-                        (selectedBooking.paymentStatus?.paidAmount || 0)
-                      }
+                      max={getRemainingAmount(selectedBooking)}
+                      disabled={getRemainingAmount(selectedBooking) <= 0}
                       value={paymentForm.amount}
                       onChange={(e) =>
                         setPaymentForm({
@@ -1157,7 +2119,7 @@ export default function UmrahBooking() {
                   </button>
                   <button
                     type="submit"
-                    disabled={submittingPayment}
+                    disabled={submittingPayment || getRemainingAmount(selectedBooking) <= 0}
                     className="flex-2 px-6 py-3.5 bg-emerald-600 text-white font-bold text-sm rounded-xl hover:bg-emerald-700 shadow-lg shadow-emerald-200 transition-all disabled:opacity-50"
                   >
                     {submittingPayment ? "Processing..." : "Confirm Payment"}
@@ -1185,7 +2147,7 @@ export default function UmrahBooking() {
                   Booking Details
                 </h2>
                 <p className="text-gray-500 text-sm mt-1">
-                  {selectedBooking.bookingNumber}
+                  {selectedBooking.bookingId || selectedBooking.bookingNumber}
                 </p>
               </div>
               <button
@@ -1208,7 +2170,8 @@ export default function UmrahBooking() {
                       Package
                     </p>
                     <p className="font-semibold text-gray-900">
-                      {selectedBooking.packageName}
+                      {selectedBooking.metadata?.packageName ||
+                        selectedBooking.packageName}
                     </p>
                   </div>
                   <div>
@@ -1216,8 +2179,11 @@ export default function UmrahBooking() {
                       Total Price
                     </p>
                     <p className="font-bold text-emerald-600 text-lg">
-                      PKR{" "}
-                      {selectedBooking.pricing?.totalPrice?.toLocaleString()}
+                      {selectedBooking.metadata?.currency || "PKR"}{" "}
+                      {(
+                        selectedBooking.metadata?.totalPrice ||
+                        selectedBooking.pricing?.totalPrice
+                      )?.toLocaleString()}
                     </p>
                   </div>
                   <div>
@@ -1225,7 +2191,8 @@ export default function UmrahBooking() {
                       Passengers
                     </p>
                     <p className="font-semibold text-gray-900">
-                      {selectedBooking.passengerCount?.total ||
+                      {selectedBooking.metadata?.totalPassengers ||
+                        selectedBooking.passengerCount?.total ||
                         selectedBooking.passengers?.length}
                     </p>
                   </div>
@@ -1233,10 +2200,42 @@ export default function UmrahBooking() {
                     <p className="text-gray-500 text-xs font-semibold uppercase">
                       Booking Status
                     </p>
-                    <span className="inline-block px-2 py-1 rounded-full bg-gray-100 text-gray-700 text-xs font-medium">
-                      {selectedBooking.overallStatus}
+                    <span className="inline-block px-2 py-1 rounded-full text-xs font-medium capitalize">
+                      {selectedBooking.status || selectedBooking.overallStatus}
                     </span>
                   </div>
+                  {selectedBooking.metadata?.roomType && (
+                    <div>
+                      <p className="text-gray-500 text-xs font-semibold uppercase">
+                        Room Type
+                      </p>
+                      <p className="font-semibold text-gray-900 capitalize">
+                        {selectedBooking.metadata.roomType}
+                      </p>
+                    </div>
+                  )}
+                  {/* <div>
+                    <p className="text-gray-500 text-xs font-semibold uppercase">
+                      Booking Expiry
+                    </p>
+                    {selectedBooking.expiresAt ? (
+                      (() => {
+                        const expiry = new Date(selectedBooking.expiresAt);
+                        const isExpired = expiry < new Date();
+                        return (
+                          <p className={`font-semibold text-sm ${
+                            isExpired ? "text-red-600" : "text-amber-600"
+                          }`}>
+                            {expiry.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" })}
+                            {" "}{expiry.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })}
+                            {isExpired && " (Expired)"}
+                          </p>
+                        );
+                      })()
+                    ) : (
+                      <p className="font-semibold text-gray-500">No Expiry</p>
+                    )}
+                  </div> */}
                 </div>
               </div>
 
@@ -1247,7 +2246,10 @@ export default function UmrahBooking() {
                   Passenger Details
                 </h3>
                 <div className="space-y-3">
-                  {selectedBooking.passengers?.map((passenger, idx) => (
+                  {(
+                    selectedBooking.metadata?.passengers ||
+                    selectedBooking.passengers
+                  )?.map((passenger, idx) => (
                     <div
                       key={idx}
                       className="bg-white rounded-xl border border-gray-200 p-4"
@@ -1255,10 +2257,11 @@ export default function UmrahBooking() {
                       <div className="flex items-start justify-between mb-3">
                         <div>
                           <h4 className="font-bold text-gray-900 text-base">
-                            {passenger.title} {passenger.givenName}{" "}
-                            {passenger.surName}
+                            {passenger.title && `${passenger.title} `}
+                            {passenger.name ||
+                              `${passenger.givenName} ${passenger.surName}`}
                           </h4>
-                          <span className="inline-block px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 text-xs font-medium mt-1">
+                          <span className="inline-block px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 text-xs font-medium mt-1 capitalize">
                             {passenger.type}
                           </span>
                         </div>
@@ -1291,31 +2294,51 @@ export default function UmrahBooking() {
                             {passenger.nationality}
                           </p>
                         </div>
-                        <div>
-                          <p className="text-gray-500 text-xs font-semibold uppercase mb-1">
-                            Date of Birth
-                          </p>
-                          <p className="font-semibold text-gray-900">
-                            {new Date(
-                              passenger.dateOfBirth,
-                            ).toLocaleDateString()}
-                          </p>
-                        </div>
-                        <div>
-                          <p className="text-gray-500 text-xs font-semibold uppercase mb-1">
-                            Passport Expiry
-                          </p>
-                          <p className="font-semibold text-gray-900">
-                            {new Date(
-                              passenger.passportExpiry,
-                            ).toLocaleDateString()}
-                          </p>
-                        </div>
+                        {passenger.dob || passenger.dateOfBirth ? (
+                          <div>
+                            <p className="text-gray-500 text-xs font-semibold uppercase mb-1">
+                              Date of Birth
+                            </p>
+                            <p className="font-semibold text-gray-900">
+                              {new Date(
+                                passenger.dob || passenger.dateOfBirth,
+                              ).toLocaleDateString()}
+                            </p>
+                          </div>
+                        ) : null}
+                        {passenger.passportExpiry ? (
+                          <div>
+                            <p className="text-gray-500 text-xs font-semibold uppercase mb-1">
+                              Passport Expiry
+                            </p>
+                            <p className="font-semibold text-gray-900">
+                              {new Date(
+                                passenger.passportExpiry,
+                              ).toLocaleDateString()}
+                            </p>
+                          </div>
+                        ) : null}
                       </div>
                     </div>
                   ))}
                 </div>
               </div>
+
+              {/* Special Requests */}
+              {(selectedBooking.metadata?.specialRequests ||
+                selectedBooking.specialRequests) && (
+                  <div>
+                    <h3 className="text-lg font-bold text-gray-900 mb-3">
+                      Special Requests
+                    </h3>
+                    <div className="bg-amber-50 rounded-xl border border-amber-200 p-4">
+                      <p className="text-sm text-gray-800">
+                        {selectedBooking.metadata?.specialRequests ||
+                          selectedBooking.specialRequests}
+                      </p>
+                    </div>
+                  </div>
+                )}
 
               {/* Payment Status & History */}
               <div>
@@ -1323,76 +2346,106 @@ export default function UmrahBooking() {
                   <CreditCard className="w-5 h-5 text-emerald-600" />
                   Payment Status
                 </h3>
+                {/* Summary bar */}
+                {(() => {
+                  const payments = getPayments(selectedBooking);
+                  const total = selectedBooking.metadata?.totalPrice || 0;
+                  const approved = payments
+                    .filter((p) => p.status === "approved")
+                    .reduce((s, p) => s + (p.amount || 0), 0);
+                  const remaining = Math.max(0, total - approved);
+                  const isFullyPaid = total > 0 && approved >= total;
+                  if (payments.length === 0 && total === 0) return null;
+                  return (
+                    <div className="grid grid-cols-3 gap-3 mb-4">
+                      <div className="bg-gray-50 rounded-xl p-3 text-center">
+                        <p className="text-[10px] font-bold uppercase text-gray-500 mb-1">Total</p>
+                        <p className="font-bold text-gray-900 text-sm">
+                          {selectedBooking.metadata?.currency || "PKR"} {total.toLocaleString()}
+                        </p>
+                      </div>
+                      <div className="bg-emerald-50 rounded-xl p-3 text-center">
+                        <p className="text-[10px] font-bold uppercase text-emerald-600 mb-1">Paid</p>
+                        <p className="font-bold text-emerald-800 text-sm">
+                          {selectedBooking.metadata?.currency || "PKR"} {approved.toLocaleString()}
+                        </p>
+                      </div>
+                      <div className={`rounded-xl p-3 text-center ${isFullyPaid ? "bg-emerald-50" : "bg-amber-50"}`}>
+                        <p className={`text-[10px] font-bold uppercase mb-1 ${isFullyPaid ? "text-emerald-600" : "text-amber-600"}`}>
+                          {isFullyPaid ? "Fully Paid" : "Remaining"}
+                        </p>
+                        <p className={`font-bold text-sm ${isFullyPaid ? "text-emerald-800" : "text-amber-800"}`}>
+                          {selectedBooking.metadata?.currency || "PKR"} {remaining.toLocaleString()}
+                        </p>
+                      </div>
+                    </div>
+                  );
+                })()}
                 <div className="space-y-3">
-                  {selectedBooking.paymentStatus?.paymentHistory?.length > 0 ? (
-                    selectedBooking.paymentStatus.paymentHistory.map(
-                      (payment, idx) => (
-                        <div
-                          key={idx}
-                          className="rounded-xl border border-gray-200 bg-white overflow-hidden"
-                        >
-                          <div className="flex items-center justify-between p-4 bg-gray-50">
-                            <div className="flex-1">
-                              <p className="font-bold text-gray-900 text-lg">
-                                PKR {payment.amount?.toLocaleString()}
-                              </p>
-                              <p className="text-xs text-gray-500 mt-1">
-                                {new Date(
-                                  payment.paymentDate,
-                                ).toLocaleDateString()}{" "}
-                                • {payment.method}
-                                {payment.receiptNumber &&
-                                  ` • ${payment.receiptNumber}`}
-                              </p>
-                            </div>
-                            <span
-                              className={`px-3 py-1.5 rounded-full text-xs font-bold ${
-                                payment.paymentStatus === "Approved" ||
-                                payment.paymentStatus === "Received"
-                                  ? "bg-emerald-100 text-emerald-700"
-                                  : payment.paymentStatus === "Pending"
-                                    ? "bg-blue-100 text-blue-700"
-                                    : payment.paymentStatus === "Rejected"
-                                      ? "bg-red-100 text-red-700"
-                                      : "bg-amber-100 text-amber-700"
-                              }`}
-                            >
-                              {payment.paymentStatus === "Pending"
-                                ? "Pending Review"
-                                : payment.paymentStatus === "Received"
-                                  ? "Approved"
-                                  : payment.paymentStatus || "Pending"}
-                            </span>
+                  {getPayments(selectedBooking).length > 0 ? (
+                    getPayments(selectedBooking).map((payment, idx) => (
+                      <div
+                        key={idx}
+                        className="rounded-xl border border-gray-200 bg-white overflow-hidden"
+                      >
+                        <div className="flex items-center justify-between p-4 bg-gray-50">
+                          <div className="flex-1">
+                            <p className="font-bold text-gray-900 text-lg">
+                              {payment.currency || selectedBooking.metadata?.currency || "PKR"}{" "}
+                              {payment.amount?.toLocaleString()}
+                            </p>
+                            <p className="text-xs text-gray-500 mt-1">
+                              {payment.submittedAt
+                                ? new Date(payment.submittedAt).toLocaleDateString()
+                                : "—"}{" "}
+                              • {payment.method || "—"}
+                              {payment.transactionRef
+                                ? ` • Ref: ${payment.transactionRef}`
+                                : ""}
+                            </p>
                           </div>
-                          {payment.paymentStatus === "Rejected" &&
-                            payment.rejectionReason && (
-                              <div className="px-4 py-3 bg-red-50 border-t border-red-200">
-                                <p className="text-xs font-semibold text-red-700 uppercase mb-1">
-                                  Rejection Reason:
-                                </p>
-                                <p className="text-sm text-red-800">
-                                  {payment.rejectionReason}
-                                </p>
-                              </div>
-                            )}
-                          {(payment.paymentStatus === "Approved" ||
-                            payment.paymentStatus === "Received") &&
-                            payment.approvalProofFile && (
-                              <div className="px-4 py-3 bg-emerald-50 border-t border-emerald-200">
-                                <a
-                                  href={payment.approvalProofFile}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                  className="flex items-center gap-2 text-sm text-emerald-700 hover:text-emerald-900 font-medium"
-                                >
-                                  <CheckCircle className="w-4 h-4" />
-                                  View Approval Proof
-                                </a>
-                              </div>
-                            )}
+                          <span
+                            className={`px-3 py-1.5 rounded-full text-xs font-bold ${payment.status === "approved"
+                                ? "bg-emerald-100 text-emerald-700"
+                                : payment.status === "pending"
+                                  ? "bg-blue-100 text-blue-700"
+                                  : payment.status === "rejected"
+                                    ? "bg-red-100 text-red-700"
+                                    : "bg-amber-100 text-amber-700"
+                              }`}
+                          >
+                            {payment.status === "pending"
+                              ? "Pending Review"
+                              : payment.status === "approved"
+                                ? "Approved"
+                                : payment.status === "rejected"
+                                  ? "Rejected"
+                                  : payment.status || "Pending"}
+                          </span>
                         </div>
-                      ),
-                    )
+                        {payment.status === "rejected" && payment.note && (
+                          <div className="px-4 py-3 bg-red-50 border-t border-red-200">
+                            <p className="text-xs font-semibold text-red-700 uppercase mb-1">
+                              Rejection Note:
+                            </p>
+                            <p className="text-sm text-red-800">{payment.note}</p>
+                          </div>
+                        )}
+                        {payment.receiptImage && (
+                          <div className="px-4 py-3 bg-gray-50 border-t border-gray-100">
+                            <a
+                              href={payment.receiptImage}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="flex items-center gap-2 text-sm text-blue-600 hover:text-blue-800 font-medium"
+                            >
+                              <Upload className="w-4 h-4" />
+                              View Receipt
+                            </a>
+                          </div>
+                        )}
+                      </div>
+                    ))
                   ) : (
                     <p className="text-gray-500 text-sm italic">
                       No payment submitted yet
@@ -1402,76 +2455,69 @@ export default function UmrahBooking() {
               </div>
 
               {/* Visa Status */}
-              {selectedBooking.visaStatus?.status &&
-                selectedBooking.visaStatus.status !== "Not Applied" && (
-                  <div>
-                    <h3 className="text-lg font-bold text-gray-900 mb-3 flex items-center gap-2">
-                      <FileCheck className="w-5 h-5 text-blue-600" />
-                      Visa Status
-                    </h3>
-                    <div className="rounded-xl border border-blue-200 bg-blue-50 p-4 space-y-3">
+              {getVisaRawKey(selectedBooking) && getVisaRawKey(selectedBooking) !== "not_applied" && (
+                <div>
+                  <h3 className="text-lg font-bold text-gray-900 mb-3 flex items-center gap-2">
+                    <FileCheck className="w-5 h-5 text-blue-600" />
+                    Visa Status
+                  </h3>
+                  <div className="rounded-xl border border-blue-200 bg-blue-50 p-4 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm font-medium text-gray-700">
+                        Status:
+                      </span>
+                      <span className={`px-3 py-1 rounded-full text-sm font-bold text-white ${{ approved: "bg-blue-600", submitted: "bg-amber-500", rejected: "bg-red-600", cancelled: "bg-red-600", send_to_embassy: "bg-purple-600" }[getVisaRawKey(selectedBooking)] || "bg-gray-500"
+                        }`}
+                      >
+                        {getVisaLabel(selectedBooking)}
+                      </span>
+                    </div>
+                    {selectedBooking.visaStatus?.applicationNumber && (
                       <div className="flex items-center justify-between">
                         <span className="text-sm font-medium text-gray-700">
-                          Status:
+                          Application Number:
                         </span>
-                        <span
-                          className={`px-3 py-1 rounded-full text-sm font-bold ${
-                            selectedBooking.visaStatus.status === "Approved"
-                              ? "bg-blue-600 text-white"
-                              : selectedBooking.visaStatus.status === "Rejected"
-                                ? "bg-red-600 text-white"
-                                : "bg-amber-600 text-white"
-                          }`}
-                        >
-                          {selectedBooking.visaStatus.status}
+                        <span className="text-sm font-bold text-gray-900">
+                          {selectedBooking.visaStatus.applicationNumber}
                         </span>
                       </div>
-                      {selectedBooking.visaStatus.applicationNumber && (
-                        <div className="flex items-center justify-between">
-                          <span className="text-sm font-medium text-gray-700">
-                            Application Number:
-                          </span>
-                          <span className="text-sm font-bold text-gray-900">
-                            {selectedBooking.visaStatus.applicationNumber}
-                          </span>
-                        </div>
-                      )}
-                      {selectedBooking.visaStatus.approvalDate && (
-                        <div className="flex items-center justify-between">
-                          <span className="text-sm font-medium text-gray-700">
-                            Approval Date:
-                          </span>
-                          <span className="text-sm font-bold text-gray-900">
-                            {new Date(
-                              selectedBooking.visaStatus.approvalDate,
-                            ).toLocaleDateString()}
-                          </span>
-                        </div>
-                      )}
-                      {selectedBooking.visaStatus.notes && (
-                        <div className="pt-3 border-t border-blue-300">
-                          <p className="text-xs font-semibold text-blue-900 uppercase mb-1">
-                            Notes:
-                          </p>
-                          <p className="text-sm text-gray-800">
-                            {selectedBooking.visaStatus.notes}
-                          </p>
-                        </div>
-                      )}
-                      {selectedBooking.visaStatus.approvalDocument && (
-                        <a
-                          href={selectedBooking.visaStatus.approvalDocument}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="flex items-center gap-2 text-sm text-blue-700 hover:text-blue-900 font-medium pt-2"
-                        >
-                          <FileCheck className="w-4 h-4" />
-                          View Visa Document
-                        </a>
-                      )}
-                    </div>
+                    )}
+                    {selectedBooking.visaStatus?.approvalDate && (
+                      <div className="flex items-center justify-between">
+                        <span className="text-sm font-medium text-gray-700">
+                          Approval Date:
+                        </span>
+                        <span className="text-sm font-bold text-gray-900">
+                          {new Date(
+                            selectedBooking.visaStatus.approvalDate,
+                          ).toLocaleDateString()}
+                        </span>
+                      </div>
+                    )}
+                    {selectedBooking.visaStatus?.notes && (
+                      <div className="pt-3 border-t border-blue-300">
+                        <p className="text-xs font-semibold text-blue-900 uppercase mb-1">
+                          Notes:
+                        </p>
+                        <p className="text-sm text-gray-800">
+                          {selectedBooking.visaStatus.notes}
+                        </p>
+                      </div>
+                    )}
+                    {selectedBooking.visaStatus?.approvalDocument && (
+                      <a
+                        href={selectedBooking.visaStatus.approvalDocument}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="flex items-center gap-2 text-sm text-blue-700 hover:text-blue-900 font-medium pt-2"
+                      >
+                        <FileCheck className="w-4 h-4" />
+                        View Visa Document
+                      </a>
+                    )}
                   </div>
-                )}
+                </div>
+              )}
 
               {/* Hotel Status */}
               {selectedBooking.hotelStatus?.status &&
@@ -1487,14 +2533,13 @@ export default function UmrahBooking() {
                           Status:
                         </span>
                         <span
-                          className={`px-3 py-1 rounded-full text-sm font-bold ${
-                            selectedBooking.hotelStatus.status === "Confirmed"
+                          className={`px-3 py-1 rounded-full text-sm font-bold ${selectedBooking.hotelStatus.status === "Confirmed"
                               ? "bg-purple-600 text-white"
                               : selectedBooking.hotelStatus.status ===
-                                  "Cancelled"
+                                "Cancelled"
                                 ? "bg-red-600 text-white"
                                 : "bg-amber-600 text-white"
-                          }`}
+                            }`}
                         >
                           {selectedBooking.hotelStatus.status}
                         </span>
@@ -1557,18 +2602,26 @@ export default function UmrahBooking() {
               >
                 Close
               </button>
-              {selectedBooking.paymentStatus?.status !== "Paid" && (
-                <button
-                  onClick={() => {
-                    handleCloseDetailsModal();
-                    handleOpenPaymentModal(selectedBooking);
-                  }}
-                  className="px-6 py-2.5 bg-emerald-600 text-white rounded-xl font-semibold hover:bg-emerald-700 transition-all shadow-lg shadow-emerald-200 flex items-center gap-2"
-                >
-                  <Plus className="w-4 h-4" />
-                  Submit Payment
-                </button>
-              )}
+              {(() => {
+                const pmts = getPayments(selectedBooking);
+                const total = selectedBooking.metadata?.totalPrice || 0;
+                const approved = pmts
+                  .filter((p) => p.status === "approved")
+                  .reduce((s, p) => s + (p.amount || 0), 0);
+                const isFullyPaid = total > 0 && approved >= total;
+                return !isFullyPaid ? (
+                  <button
+                    onClick={() => {
+                      handleCloseDetailsModal();
+                      handleOpenPaymentModal(selectedBooking);
+                    }}
+                    className="px-6 py-2.5 bg-emerald-600 text-white rounded-xl font-semibold hover:bg-emerald-700 transition-all shadow-lg shadow-emerald-200 flex items-center gap-2"
+                  >
+                    <Plus className="w-4 h-4" />
+                    Submit Payment
+                  </button>
+                ) : null;
+              })()}
             </div>
           </div>
         </div>
@@ -1576,7 +2629,7 @@ export default function UmrahBooking() {
 
       {/* EDIT BOOKING MODAL */}
       {showEditModal && selectedBooking && (
-        <div className="fixed inset-0 z-100 flex items-center justify-center p-4">
+        <div className="fixed inset-0 flex items-center justify-center p-4 z-1000">
           <div
             className="absolute inset-0 bg-gray-900/40 backdrop-blur-sm transition-opacity"
             onClick={handleCloseEditModal}
@@ -1590,10 +2643,15 @@ export default function UmrahBooking() {
                   Edit Booking
                 </h2>
                 <p className="text-gray-500 text-sm mt-1">
-                  {selectedBooking.bookingNumber}
+                  {selectedBooking.bookingId || selectedBooking.bookingNumber}
+                </p>
+                <p className="text-gray-700 text-sm font-semibold mt-1">
+                  {selectedBooking.metadata?.packageName ||
+                    selectedBooking.packageName ||
+                    "Umrah Package"}
                 </p>
                 <p className="text-amber-600 text-xs font-semibold mt-2">
-                  ⚠️ You can only edit before submitting any payment
+                  You can edit this booking while it is pending
                 </p>
               </div>
               <button
@@ -1608,6 +2666,133 @@ export default function UmrahBooking() {
               onSubmit={handleUpdateBooking}
               className="flex-1 overflow-y-auto px-8 py-6"
             >
+              {/* Room & Pricing Section */}
+              <div className="mb-6 bg-gray-50 rounded-xl p-4 border border-gray-200">
+                {(() => {
+                  const roomOptions = getEditableRoomOptions(selectedBooking);
+                  const counts = getEditPassengerCounts();
+                  const payingPassengers = counts.adults + counts.children;
+                  const adultLimit = getAdultLimit(editForm.roomType);
+                  const requiredAdults = getRequiredAdultCount(editForm.roomType);
+                  const payingLimit = getPayingPassengerLimit();
+                  const availableSeats = getAvailableSeatsFromPackage();
+                  const selectedRoomPrice = getRoomPrice(editForm.roomType);
+                  const isAdultOverLimit =
+                    adultLimit !== null && counts.adults > adultLimit;
+                  const isAdultUnderRequired =
+                    requiredAdults !== null && counts.adults < requiredAdults;
+                  const isPayingOverLimit =
+                    payingLimit !== null && payingPassengers > payingLimit;
+
+                  return (
+                    <>
+                      <div className="flex flex-col lg:flex-row lg:items-end gap-4">
+                        <div className=" min-w-[320px]">
+                          <label className="text-xs font-semibold text-gray-600 ml-1 mb-1 block">
+                            Room Type *
+                          </label>
+                          <select
+                            required
+                            value={editForm.roomType}
+                            onChange={(e) =>
+                              handleEditRoomTypeChange(e.target.value)
+                            }
+                            className="w-full px-3 py-2 bg-white border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 text-sm capitalize"
+                          >
+                            {roomOptions.map((room) => (
+                              <option key={room} value={room}>
+                                {room.charAt(0).toUpperCase() + room.slice(1)}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+
+                        <div className="grid grid-cols-2 md:grid-cols-5 gap-3 flex-1">
+                          <div className="bg-white rounded-lg border border-gray-200 p-3">
+                            <p className="text-[10px] font-bold uppercase text-gray-500 mb-1">
+                              Room Price
+                            </p>
+                            <p className="text-sm font-bold text-blue-700">
+                              PKR {selectedRoomPrice.toLocaleString()}
+                            </p>
+                          </div>
+                          <div className="bg-white rounded-lg border border-gray-200 p-3">
+                            <p className="text-[10px] font-bold uppercase text-gray-500 mb-1">
+                              Group Seats Left
+                            </p>
+                            <p className="text-sm font-bold text-emerald-700">
+                              {availableSeats === null
+                                ? "N/A"
+                                : availableSeats}
+                            </p>
+                          </div>
+                          <div className="bg-white rounded-lg border border-gray-200 p-3">
+                            <p className="text-[10px] font-bold uppercase text-gray-500 mb-1">
+                              Adults
+                            </p>
+                            <p
+                              className={`text-sm font-bold ${isAdultOverLimit || isAdultUnderRequired
+                                  ? "text-red-700"
+                                  : "text-gray-900"
+                                }`}
+                            >
+                              {counts.adults}
+                              {requiredAdults !== null
+                                ? ` / ${requiredAdults} required`
+                                : adultLimit !== null
+                                  ? ` / ${adultLimit}`
+                                  : ""}
+                            </p>
+                          </div>
+                          <div className="bg-white rounded-lg border border-gray-200 p-3">
+                            <p className="text-[10px] font-bold uppercase text-gray-500 mb-1">
+                              Adult/Child Seats
+                            </p>
+                            <p
+                              className={`text-sm font-bold ${isPayingOverLimit
+                                  ? "text-red-700"
+                                  : "text-gray-900"
+                                }`}
+                            >
+                              {payingPassengers}
+                              {payingLimit !== null ? ` / ${payingLimit}` : ""}
+                            </p>
+                          </div>
+                          <div className="bg-white rounded-lg border border-gray-200 p-3">
+                            <p className="text-[10px] font-bold uppercase text-gray-500 mb-1">
+                              New Total
+                            </p>
+                            <p className="text-sm font-bold text-emerald-700">
+                              PKR{" "}
+                              {calculateEditTotal().toLocaleString()}
+                            </p>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-gray-600">
+                        <span className="px-2 py-1 rounded-full bg-white border border-gray-200">
+                          Adults: {counts.adults}
+                        </span>
+                        <span className="px-2 py-1 rounded-full bg-white border border-gray-200">
+                          Children: {counts.children}
+                        </span>
+                        <span className="px-2 py-1 rounded-full bg-white border border-gray-200">
+                          Infants: {counts.infants}
+                        </span>
+                        {(isAdultOverLimit ||
+                          isAdultUnderRequired ||
+                          isPayingOverLimit) && (
+                            <span className="px-2 py-1 rounded-full bg-red-50 border border-red-200 text-red-700 font-semibold">
+                              Fixed rooms require exact adult occupancy; children follow seat availability
+                            </span>
+                          )}
+                      </div>
+                    </>
+                  );
+                })()}
+              </div>
+
               {/* Passengers Section */}
               <div className="mb-6">
                 <div className="flex items-center justify-between mb-4">
@@ -1615,14 +2800,32 @@ export default function UmrahBooking() {
                     <UserPlus className="w-5 h-5 text-blue-600" />
                     Passengers ({editForm.passengers.length})
                   </h3>
-                  <button
-                    type="button"
-                    onClick={handleAddPassenger}
-                    className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm font-semibold"
-                  >
-                    <Plus className="w-4 h-4" />
-                    Add Passenger
-                  </button>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => handleAddPassenger("Adult")}
+                      className="flex items-center gap-2 px-3 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm font-semibold"
+                    >
+                      <Plus className="w-4 h-4" />
+                      Adult
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleAddPassenger("Child")}
+                      className="flex items-center gap-2 px-3 py-2 bg-sky-600 text-white rounded-lg hover:bg-sky-700 text-sm font-semibold"
+                    >
+                      <Plus className="w-4 h-4" />
+                      Child
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleAddPassenger("Infant")}
+                      className="flex items-center gap-2 px-3 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 text-sm font-semibold"
+                    >
+                      <Plus className="w-4 h-4" />
+                      Infant
+                    </button>
+                  </div>
                 </div>
 
                 <div className="space-y-4">
@@ -1635,16 +2838,27 @@ export default function UmrahBooking() {
                         <h4 className="font-semibold text-gray-900">
                           Passenger {index + 1}
                         </h4>
-                        {editForm.passengers.length > 1 && (
+                        <div className="flex items-center gap-2">
                           <button
                             type="button"
-                            onClick={() => handleRemovePassenger(index)}
-                            className="flex items-center gap-1 px-3 py-1.5 bg-red-100 text-red-700 rounded-lg hover:bg-red-200 text-sm font-semibold"
+                            onClick={() => handleOpenMrzModal(index)}
+                            className="flex items-center gap-1 px-3 py-1.5 bg-indigo-100 text-indigo-700 rounded-lg hover:bg-indigo-200 text-sm font-semibold"
+                            title="Scan passport MRZ"
                           >
-                            <Trash2 className="w-3 h-3" />
-                            Remove
+                            <Scan className="w-3 h-3" />
+                            MRZ
                           </button>
-                        )}
+                          {canRemovePassenger(passenger) && (
+                            <button
+                              type="button"
+                              onClick={() => handleRemovePassenger(index)}
+                              className="flex items-center gap-1 px-3 py-1.5 bg-red-100 text-red-700 rounded-lg hover:bg-red-200 text-sm font-semibold"
+                            >
+                              <Trash2 className="w-3 h-3" />
+                              Remove
+                            </button>
+                          )}
+                        </div>
                       </div>
 
                       <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
@@ -1803,6 +3017,12 @@ export default function UmrahBooking() {
                           <input
                             type="date"
                             required
+                            min={(() => {
+                              const d = new Date();
+                              d.setMonth(d.getMonth() + 6);
+                              d.setDate(d.getDate() + 1);
+                              return d.toISOString().split("T")[0];
+                            })()}
                             value={
                               passenger.passportExpiry?.split("T")[0] ||
                               passenger.passportExpiry
@@ -1819,22 +3039,70 @@ export default function UmrahBooking() {
                         </div>
                       </div>
 
-                      {passenger.documentUrl && (
-                        <div className="mt-3 flex items-center gap-2">
-                          <span className="text-xs font-semibold text-gray-600">
-                            Passport Document:
-                          </span>
-                          <a
-                            href={passenger.documentUrl}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="flex items-center gap-1 text-xs text-blue-600 hover:text-blue-800 font-medium"
+                      <div className="mt-3">
+                        <label className="text-xs font-semibold text-gray-600 ml-1 mb-1 block">
+                          Passport Document *
+                        </label>
+                        <div className="flex items-center gap-3">
+                          <label
+                            className={`flex items-center gap-2 cursor-pointer px-3 py-2 border border-dashed rounded-lg text-xs transition-colors ${passportFiles[index] || passenger.documentUrl
+                                ? "bg-emerald-50 border-emerald-300 text-emerald-700"
+                                : "bg-red-50 border-red-300 text-red-700 hover:bg-red-100"
+                              }`}
                           >
-                            <FileCheck className="w-3 h-3" />
-                            View Document
-                          </a>
+                            <Upload className="w-3.5 h-3.5" />
+                            {passportFiles[index]
+                              ? passportFiles[index].name
+                              : passenger.documentUrl
+                                ? "Replace document"
+                                : "Upload passport document"}
+                            <input
+                              type="file"
+                              required={!passenger.documentUrl && !passportFiles[index]}
+                              accept="image/jpeg,image/png,image/webp,application/pdf"
+                              className="hidden"
+                              onChange={(e) => {
+                                const file = e.target.files?.[0];
+                                if (file)
+                                  setPassportFiles((prev) => ({
+                                    ...prev,
+                                    [index]: file,
+                                  }));
+                              }}
+                            />
+                          </label>
+                          {(passportFiles[index] || passenger.documentUrl) && (
+                            <div className="flex items-center gap-2">
+                              {passenger.documentUrl && !passportFiles[index] && (
+                                <a
+                                  href={passenger.documentUrl}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="flex items-center gap-1 text-xs text-blue-600 hover:text-blue-800 font-medium"
+                                >
+                                  <FileCheck className="w-3 h-3" />
+                                  View Current
+                                </a>
+                              )}
+                              {passportFiles[index] && (
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    setPassportFiles((prev) => {
+                                      const next = { ...prev };
+                                      delete next[index];
+                                      return next;
+                                    })
+                                  }
+                                  className="text-xs text-red-500 hover:text-red-700"
+                                >
+                                  Remove
+                                </button>
+                              )}
+                            </div>
+                          )}
                         </div>
-                      )}
+                      </div>
                     </div>
                   ))}
                 </div>
@@ -1887,6 +3155,81 @@ export default function UmrahBooking() {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {mrzModal.open && (
+        <div className="fixed inset-0 z-[12000] flex items-center justify-center p-4">
+          <div
+            className="absolute inset-0 bg-gray-900/50 backdrop-blur-sm"
+            onClick={handleCloseMrzModal}
+          ></div>
+
+          <div className="relative bg-white rounded-2xl shadow-2xl max-w-xl w-full overflow-hidden">
+            <div className="px-6 py-4 border-b border-gray-200 flex items-start justify-between bg-indigo-50">
+              <div>
+                <h3 className="text-lg font-bold text-gray-900">
+                  Scan Passport MRZ
+                </h3>
+                <p className="text-xs text-gray-600 mt-1">
+                  Passenger {(mrzModal.index ?? 0) + 1}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={handleCloseMrzModal}
+                className="p-2 bg-white text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-full transition-all shadow-sm"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-6 space-y-4">
+              <div className="flex items-start gap-3 rounded-xl border border-indigo-100 bg-indigo-50 p-3">
+                <Scan className="w-5 h-5 text-indigo-600 mt-0.5" />
+                <p className="text-sm text-indigo-800">
+                  Paste the two passport MRZ lines. Multiple passports can be
+                  pasted with a blank line between each one.
+                </p>
+              </div>
+
+              <textarea
+                value={mrzInput}
+                onChange={(e) => {
+                  setMrzInput(e.target.value);
+                  setMrzError("");
+                }}
+                rows={8}
+                className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all outline-none text-sm font-mono"
+                placeholder={"P<PAKDOE<<JOHN<<<<<<<<<<<<<<<<<<<<<<<<<\nAA1234567<0PAK8901015M3012319<<<<<<<<<<<<08"}
+              />
+
+              {mrzError && (
+                <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-red-700">
+                  {mrzError}
+                </div>
+              )}
+
+              <div className="flex justify-end gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={handleCloseMrzModal}
+                  className="px-5 py-2.5 text-sm font-semibold text-gray-600 hover:bg-gray-100 rounded-xl transition-all"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={handleMrzParse}
+                  disabled={!mrzInput.trim()}
+                  className="px-5 py-2.5 text-sm font-semibold bg-indigo-600 text-white rounded-xl hover:bg-indigo-700 transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+                >
+                  <Scan className="w-4 h-4" />
+                  Parse MRZ
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       )}

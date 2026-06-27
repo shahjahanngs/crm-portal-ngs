@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { getUserProfile, updateUserProfile } from "../../api/profileApi";
 import TopBar from "../TopBar/TopBar";
+import { UserCircle } from "lucide-react";
 
 export default function Profile() {
   const [user, setUser] = useState(null);
@@ -161,7 +162,10 @@ export default function Profile() {
 
   return (
     <>
-      <TopBar title={"My Profile"} />
+      <TopBar
+        title={"My Profile"}
+        icon={<UserCircle className="text-white w-6 h-6" />}
+      />
       <div className="w-full min-h-screen bg-gray-50 py-8">
         <div className="max-w-5xl mx-auto px-6">
           {/* Profile Form */}

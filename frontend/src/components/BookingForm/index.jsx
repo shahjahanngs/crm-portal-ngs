@@ -4,7 +4,7 @@ import axiosInstance from "../../api/axios";
 import { toast } from "react-toastify";
 import { buildPassengers } from "../../utils/passengerBuilder";
 import MaskedDatePicker from "../MaskedDatePicker";
-import { X, CheckCircle } from "lucide-react";
+import { X, CheckCircle, FilePlus, FileEdit } from "lucide-react";
 import TopBar from "../TopBar/TopBar";
 import { parseMRZ } from "../../utils/parseMRZ";
 import countryCodes from "../../data/countryCodes.json";
@@ -29,7 +29,7 @@ export default function BookingForm({ user }) {
       .then((res) => {
         if (res.data?.success) setDbMargin(res.data.data);
       })
-      .catch(() => {});
+      .catch(() => { });
   }, []);
 
   // 3-tier margin priority:
@@ -590,11 +590,10 @@ export default function BookingForm({ user }) {
     let booked = 0;
     let key = "";
     if (flight) {
-      key = `${normalizeFlightNo(flight.flight_no)}_${
-        new Date(flight.dep_date || flight.flight_date)
+      key = `${normalizeFlightNo(flight.flight_no)}_${new Date(flight.dep_date || flight.flight_date)
           .toISOString()
           .split("T")[0]
-      }`;
+        }`;
       booked = bookedSeatsMap[key] || 0;
     }
 
@@ -686,6 +685,7 @@ export default function BookingForm({ user }) {
           })) || [],
         departureDate: groupData.dept_date,
         arrivalDate: groupData.arv_date,
+        originalPkg: groupData,
       };
 
       const response = await axiosInstance.post("/bookings", bookingData);
@@ -787,10 +787,20 @@ export default function BookingForm({ user }) {
       </div>
     );
   }
+console.log(groupData,8888);
 
   return (
     <div className="w-full min-h-screen mx-auto flex flex-col gap-2">
-      <TopBar title={isEditMode ? "Edit Booking" : "Add New Booking"} />
+      <TopBar
+        title={isEditMode ? "Edit Booking" : "Add New Booking"}
+        icon={
+          isEditMode ? (
+            <FileEdit className="text-white w-6 h-6" />
+          ) : (
+            <FilePlus className="text-white w-6 h-6" />
+          )
+        }
+      />
       <div className="mb-4 sm:mb-6 md:mb-8">
         {/* <h1 className="text-xl sm:text-2xl md:text-3xl font-bold text-gray-900 mb-2"></h1> */}
       </div>
@@ -855,14 +865,14 @@ export default function BookingForm({ user }) {
             {/* Pricing Info */}
             <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4 sm:gap-8 lg:gap-32 w-full lg:w-auto">
               <div className="flex flex-row gap-4 sm:gap-8 lg:gap-32 w-full sm:w-auto flex-wrap">
-                <div className="flex flex-col">
+                {groupData.showSeats && <div className="flex flex-col">
                   <p className="text-xs text-gray-600 font-semibold mb-0.5">
                     Available Seats
                   </p>
                   <p className="text-sm font-extrabold text-[#3d6a8f] bg-blue-50 px-2 py-1 rounded-2xl">
                     {groupData.available_no_of_pax}
                   </p>
-                </div>
+                </div>}
                 <div className="flex flex-col">
                   <p className="text-xs text-gray-600 font-semibold mb-0.5">
                     Adult Price
@@ -1300,7 +1310,7 @@ export default function BookingForm({ user }) {
                               {pendingDocs[index] ? (
                                 // Local file preview (not yet uploaded)
                                 pendingDocs[index].type ===
-                                "application/pdf" ? (
+                                  "application/pdf" ? (
                                   <span className="text-[10px] text-amber-600 font-semibold border border-amber-300 bg-amber-50 px-1.5 py-0.5 rounded">
                                     PDF ready
                                   </span>
@@ -1315,8 +1325,8 @@ export default function BookingForm({ user }) {
                                   />
                                 )
                               ) : passenger.documentUrl.match(
-                                  /\.(jpg|jpeg|png|webp)/i,
-                                ) ? (
+                                /\.(jpg|jpeg|png|webp)/i,
+                              ) ? (
                                 <a
                                   href={passenger.documentUrl}
                                   target="_blank"
@@ -1575,11 +1585,10 @@ export default function BookingForm({ user }) {
                 type="button"
                 onClick={handleMrzParse}
                 disabled={!mrzInput.trim()}
-                className={`px-6 py-2 text-sm font-bold rounded-lg transition-all ${
-                  mrzInput.trim()
+                className={`px-6 py-2 text-sm font-bold rounded-lg transition-all ${mrzInput.trim()
                     ? "bg-[#3d6a8f] text-white hover:bg-[#2d5a8f] shadow-sm hover:shadow-md"
                     : "bg-gray-200 text-gray-400 cursor-not-allowed"
-                }`}
+                  }`}
               >
                 Scan
               </button>
@@ -1766,11 +1775,10 @@ export default function BookingForm({ user }) {
                   onClick={handleFinalSubmit}
                   disabled={!isReviewed || isSubmitting}
                   className={`flex-1 sm:flex-none px-8 py-2.5 rounded-lg text-sm font-bold shadow-md flex items-center justify-center gap-2 transition-all transform active:scale-95
-                                        ${
-                                          isReviewed && !isSubmitting
-                                            ? "bg-[#3d6a8f] text-white hover:bg-[#2d5a8f] hover:shadow-lg"
-                                            : "bg-gray-300 text-gray-500 cursor-not-allowed"
-                                        }`}
+                                        ${isReviewed && !isSubmitting
+                      ? "bg-[#3d6a8f] text-white hover:bg-[#2d5a8f] hover:shadow-lg"
+                      : "bg-gray-300 text-gray-500 cursor-not-allowed"
+                    }`}
                 >
                   {isSubmitting ? <>Loading...</> : <>Submit</>}
                 </button>

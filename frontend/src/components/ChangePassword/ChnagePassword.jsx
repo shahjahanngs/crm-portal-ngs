@@ -2,6 +2,7 @@ import { useState } from "react";
 import axiosInstance from "../../api/axios";
 import { toast } from "react-toastify";
 import TopBar from "../TopBar/TopBar";
+import { Lock } from "lucide-react";
 
 const ChangePassword = () => {
   const [formData, setFormData] = useState({
@@ -89,7 +90,10 @@ const ChangePassword = () => {
 
   return (
     <>
-      <TopBar title={"Update your account password"} />
+      <TopBar
+        title={"Update your account password"}
+        icon={<Lock className="text-white w-6 h-6" />}
+      />
       <div className="w-full min-h-screen bg-gray-50 py-8">
         <div className="max-w-2xl mx-auto px-6">
           {/* Form */}

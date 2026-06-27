@@ -17,6 +17,9 @@ import {
   LogOut,
   Bell,
   List,
+  Settings,
+  Ticket,
+  Package,
 } from "lucide-react";
 import logo from "../../assets/images/logo.png";
 
@@ -86,7 +89,7 @@ export const DashboardUIContext = createContext();
 
 const DashboardLayout = ({ user, handleLogout }) => {
   const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [bookingsExpanded, setBookingsExpanded] = useState(false);
+  const [expandedMenus, setExpandedMenus] = useState({});
   const [searchQuery, setSearchQuery] = useState("");
   const [isMobile, setIsMobile] = useState(false);
   const [userDropdownOpen, setUserDropdownOpen] = useState(false);
@@ -150,13 +153,13 @@ const DashboardLayout = ({ user, handleLogout }) => {
     {
       path: "/dashboard/all-packages",
       label: "Umrah Packages",
-      icon: <Users size={18} />,
+      icon: <Package size={18} />,
       keepSidebarOpen: true,
     },
     {
       path: "/dashboard/all-groups",
       label: "All Groups",
-      icon: <Users size={18} />,
+      icon: <Ticket size={18} />,
       keepSidebarOpen: true,
     },
     {
@@ -174,6 +177,22 @@ const DashboardLayout = ({ user, handleLogout }) => {
         { path: "/dashboard/my-bookings?status=confirmed", label: "Confirmed" },
         { path: "/dashboard/my-bookings?status=cancelled", label: "Cancelled" },
         { path: "/dashboard/my-bookings", label: "All Bookings" },
+      ],
+    },
+    {
+      path: "/dashboard/other-services",
+      label: "Other Services",
+      icon: <Settings size={18} />,
+    },
+    {
+      label: "Other Bookings",
+      icon: <CalendarCheck size={18} />,
+      hasSubMenu: true,
+      menuKey: "other-bookings",
+      subItems: [
+        { path: "/dashboard/visa-bookings", label: "Visa Queries" },
+        { path: "/dashboard/hotel-bookings", label: "Hotel Queries" },
+        { path: "/dashboard/transport-bookings", label: "Transport Queries" },
       ],
     },
     { path: "/dashboard/banks", label: "Bank", icon: <Building2 size={18} /> },
@@ -221,8 +240,8 @@ const DashboardLayout = ({ user, handleLogout }) => {
       value={{
         sidebarOpen,
         setSidebarOpen,
-        bookingsExpanded,
-        setBookingsExpanded,
+        expandedMenus,
+        setExpandedMenus,
         setSearchQuery,
       }}
     >
@@ -448,7 +467,10 @@ const DashboardLayout = ({ user, handleLogout }) => {
                         <RippleButton
                           onClick={() =>
                             sidebarOpen &&
-                            setBookingsExpanded(!bookingsExpanded)
+                            setExpandedMenus((prev) => ({
+                              ...prev,
+                              [item.menuKey]: !prev[item.menuKey],
+                            }))
                           }
                           className="menu-link"
                           style={{
@@ -475,7 +497,7 @@ const DashboardLayout = ({ user, handleLogout }) => {
                               <span style={{ flex: 1 }}>{item.label}</span>
                               <span
                                 style={{
-                                  transform: bookingsExpanded
+                                  transform: expandedMenus[item.menuKey]
                                     ? "rotate(180deg)"
                                     : "rotate(0deg)",
                                   transition:
@@ -493,7 +515,9 @@ const DashboardLayout = ({ user, handleLogout }) => {
                         <div
                           style={{
                             maxHeight:
-                              bookingsExpanded && sidebarOpen ? "300px" : "0px",
+                              expandedMenus[item.menuKey] && sidebarOpen
+                                ? "300px"
+                                : "0px",
                             overflow: "hidden",
                             transition:
                               "max-height 0.3s cubic-bezier(0.4,0,0.2,1)",
@@ -529,7 +553,7 @@ const DashboardLayout = ({ user, handleLogout }) => {
                                         : "transparent",
                                       color: active ? "#fff" : "#666",
                                       textDecoration: "none",
-                                      animation: bookingsExpanded
+                                      animation: expandedMenus[item.menuKey]
                                         ? `subMenuSlide 0.2s ease ${sIdx * 40}ms both`
                                         : "none",
                                     }}

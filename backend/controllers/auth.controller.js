@@ -16,7 +16,7 @@ import api from "../services/ZipApi.js";
 =========================== */
 const generateToken = (userId) => {
   return jwt.sign({ id: userId }, process.env.JWT_SECRET, {
-    expiresIn: "7d",
+    expiresIn: "365d",
   });
 };
 
@@ -26,7 +26,7 @@ const generateToken = (userId) => {
 const handleZipAccountCreation = async (user) => {
   try {
     const zipResult = await ensureZipAccountExists({
-      name: user.companyName || user.name,
+      name: user.companyName,
       email: user.email,
     });
 
@@ -67,6 +67,14 @@ export const registerUser = async (req, res) => {
       return res.status(400).json({
         success: false,
         message: "User already exists",
+      });
+    }
+
+    const companyExists = await Register.findOne({ companyName });
+    if (companyExists) {
+      return res.status(400).json({
+        success: false,
+        message: "Company already exists",
       });
     }
     const generatedPassword =
@@ -241,6 +249,7 @@ export const loginUser = async (req, res) => {
         status: user.status,
         priceOnCall: user.priceOnCall || false,
         showHideButton: user.showHideButton || false,
+        zipId: user.zipId || null,
       },
     });
   } catch (error) {
@@ -275,11 +284,43 @@ export const getProfile = async (req, res) => {
 =========================== */
 export const getAllUsers = async (req, res) => {
   try {
-    const users = await Register.find().sort({ createdAt: -1 });
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+    const skip = (page - 1) * limit;
+
+    const query = {};
+    if (req.query.status) {
+      query.status = req.query.status;
+    }
+    if (req.query.role) {
+      query.role = req.query.role;
+    }
+    if (req.query.city && req.query.city !== "All") {
+      query.city = { $regex: req.query.city, $options: "i" };
+    }
+    if (req.query.search) {
+      const s = req.query.search;
+      query.$or = [
+        { name: { $regex: s, $options: "i" } },
+        { email: { $regex: s, $options: "i" } },
+        { companyName: { $regex: s, $options: "i" } },
+        { agencyCode: { $regex: s, $options: "i" } },
+      ];
+    }
+
+    const [users, totalUsers] = await Promise.all([
+      Register.find(query).sort({ createdAt: -1 }).skip(skip).limit(limit),
+      Register.countDocuments(query),
+    ]);
+
+    const totalPages = Math.ceil(totalUsers / limit);
 
     res.status(200).json({
       success: true,
       count: users.length,
+      totalUsers,
+      totalPages,
+      currentPage: page,
       data: users,
     });
   } catch (error) {
@@ -504,14 +545,14 @@ export const updateUserStatus = async (req, res) => {
         }
 
         const createRes = await api.post("/accounts", {
-          account_name: user.name,
+          account_name: user.companyName,
           subhead_id: subheadIdToSend,
         });
 
         const zipUserId = createRes.data._id;
         if (zipUserId) {
           await api.put(`accounts/${zipUserId}`, {
-            account_name: user.name,
+            account_name: user.companyName,
             phone: user.phone,
             email: user.email,
             address: user.address,

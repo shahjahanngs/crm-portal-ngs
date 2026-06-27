@@ -13,7 +13,7 @@ const PassengerDetailSchema = new mongoose.Schema(
     title: {
       type: String,
       required: true,
-      enum: ["Mr", "Mrs", "Ms", "Miss", "Dr"],
+      enum: ["Mr", "Mrs", "Ms", "Miss", "Dr", "Master", "Child", "INF", "Baby"],
     },
     givenName: {
       type: String,
@@ -313,6 +313,12 @@ const UmrahPackageBookingSchema = new mongoose.Schema(
 
     // Expiry Date (optional)
     expiresAt: Date,
+
+    // ZIP Accounts Integration
+    zipBookingId: String, // ID of booking created in ZIP Accounts
+    zipBookingRefNo: String, // Reference number from ZIP Accounts
+    zipBookingData: mongoose.Schema.Types.Mixed, // Complete booking response from ZIP
+    zipBookingCreatedAt: Date, // When booking was created in ZIP
   },
   { timestamps: true },
 );

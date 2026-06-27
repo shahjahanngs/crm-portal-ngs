@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import {
   Building2,
   Copy,
@@ -15,6 +15,48 @@ import axiosInstance from "../../api/axios";
 import { theme } from "../../theme/theme";
 import TopBar from "../../components/TopBar/TopBar";
 
+const pickFirst = (...values) =>
+  values.find((value) => value !== undefined && value !== null && value !== "");
+
+const extractBankList = (payload) => {
+  const data = payload?.data ?? payload;
+
+  if (Array.isArray(data)) return data;
+  if (Array.isArray(data?.data)) return data.data;
+  if (Array.isArray(data?.bankAccounts)) return data.bankAccounts;
+  if (Array.isArray(data?.bank_accounts)) return data.bank_accounts;
+  if (Array.isArray(data?.accounts)) return data.accounts;
+
+  return [];
+};
+
+const normalizeBank = (bank, index) => ({
+  id: pickFirst(bank._id, bank.id, bank.accountId, bank.account_id, index),
+  bankName: pickFirst(bank.bankName, bank.bank_name, bank.bank, bank.name, "Bank"),
+  accountTitle: pickFirst(
+    bank.accountTitle,
+    bank.bank_account_name,
+    bank.account_title,
+    bank.accountName,
+    bank.account_name,
+    bank.title,
+  ),
+  accountNo: pickFirst(
+    bank.accountNo,
+    bank.bank_account_number,
+    bank.account_no,
+    bank.accountNumber,
+    bank.account_number,
+    bank.number,
+  ),
+  iban: pickFirst(bank.iban, bank.bank_iban, bank.ibn, bank.IBAN),
+  bankAddress: pickFirst(bank.bankAddress, bank.bank_address, bank.address),
+  branchCode: pickFirst(bank.branchCode, bank.branch_code),
+  logo: pickFirst(bank.logo, bank.bankLogo, bank.logoUrl, bank.image),
+  status: bank.status,
+  isActive: bank.isActive,
+});
+
 const Bank = () => {
   const [banks, setBanks] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -22,17 +64,23 @@ const Bank = () => {
   const [copiedId, setCopiedId] = useState(null);
   const [hoveredCard, setHoveredCard] = useState(null);
 
-  const fetchBanks = async () => {
+  const fetchBanks = useCallback(async () => {
     try {
       setLoading(true);
       setError(null);
-      const response = await axiosInstance.get("/bank");
+      const response = await axiosInstance.get(
+        "/companyProfile/bank-accounts",
+      );
 
       if (response.data.success) {
-        // Sirf active banks filter kar rahe hain
-        const activeBanks = response.data.data.filter(
-          (bank) => bank.status === "Active",
-        );
+        const bankList = extractBankList(response.data);
+        const activeBanks = bankList
+          .map(normalizeBank)
+          .filter(
+            (bank) =>
+              bank.isActive !== false &&
+              (!bank.status || bank.status.toLowerCase() === "active"),
+          );
         setBanks(activeBanks);
       } else {
         setBanks([]);
@@ -43,13 +91,16 @@ const Bank = () => {
     } finally {
       setLoading(false);
     }
-  };
-
-  useEffect(() => {
-    fetchBanks();
   }, []);
 
+  useEffect(() => {
+    const timerId = window.setTimeout(fetchBanks, 0);
+
+    return () => window.clearTimeout(timerId);
+  }, [fetchBanks]);
+
   const handleCopy = (text, id) => {
+    if (!text) return;
     navigator.clipboard.writeText(text);
     setCopiedId(id);
     setTimeout(() => setCopiedId(null), 2000);
@@ -95,7 +146,10 @@ const Bank = () => {
   return (
     <div className="min-h-screen font-sans">
       {/* Header */}
-      <TopBar title={"Bank Details"} />
+      <TopBar
+        title={"Bank Details"}
+        icon={<Building2 className="text-white w-6 h-6" />}
+      />
       <div className="mx-auto px-6 relative z-10 mt-10">
         {banks.length === 0 ? (
           <div className="bg-white p-12 rounded-3xl shadow-sm text-center border border-gray-100">
@@ -106,10 +160,10 @@ const Bank = () => {
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
             {banks.map((bank, index) => (
               <div
-                key={bank._id || index}
-                onMouseEnter={() => setHoveredCard(bank._id)}
+                key={bank.id || index}
+                onMouseEnter={() => setHoveredCard(bank.id)}
                 onMouseLeave={() => setHoveredCard(null)}
-                style={cardStyle(bank._id)}
+                style={cardStyle(bank.id)}
                 className="group overflow-hidden relative"
               >
                 {/* Decorative Top Bar */}
@@ -169,15 +223,16 @@ const Bank = () => {
                         </p>
                         <div className="flex justify-between items-center group/item">
                           <p className="text-sm font-mono font-bold text-gray-700">
-                            {bank.accountNo}
+                            {bank.accountNo || "N/A"}
                           </p>
                           <button
                             onClick={() =>
-                              handleCopy(bank.accountNo, `${bank._id}-acc`)
+                              handleCopy(bank.accountNo, `${bank.id}-acc`)
                             }
+                            disabled={!bank.accountNo}
                             className="p-1.5 rounded-md hover:bg-gray-100 text-gray-400 hover:text-[#1CA8CB] transition-colors"
                           >
-                            {copiedId === `${bank._id}-acc` ? (
+                            {copiedId === `${bank.id}-acc` ? (
                               <Check size={14} />
                             ) : (
                               <Copy size={14} />
@@ -197,18 +252,16 @@ const Bank = () => {
                       </div>
                       <div className="flex justify-between items-center">
                         <p className="text-xs font-mono text-gray-600 truncate mr-2">
-                          {bank.ibn || bank.iban || "N/A"}
+                          {bank.iban || "N/A"}
                         </p>
                         <button
                           onClick={() =>
-                            handleCopy(
-                              bank.ibn || bank.iban,
-                              `${bank._id}-iban`,
-                            )
+                            handleCopy(bank.iban, `${bank.id}-iban`)
                           }
+                          disabled={!bank.iban}
                           className="text-gray-400 hover:text-[#1CA8CB]"
                         >
-                          {copiedId === `${bank._id}-iban` ? (
+                          {copiedId === `${bank.id}-iban` ? (
                             <Check size={14} />
                           ) : (
                             <Copy size={14} />

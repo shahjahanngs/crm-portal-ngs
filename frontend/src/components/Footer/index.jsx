@@ -107,7 +107,7 @@ export default function Footer({ user }) {
                 className="text-lg font-semibold"
                 style={{ color: theme.colors.sidebarTextLight }}
               >
-                CRM Portal Travels (Pvt Ltd ).
+                RGS UMRAH GROUP OF COMPANY'S
               </h2>
               <p
                 className="mt-3 text-sm leading-relaxed"
@@ -249,7 +249,7 @@ export default function Footer({ user }) {
             href="https://rgs.zipaccounts.com/"
             style={{ color: theme.colors.sidebarText }}
           >
-            &copy; {dayjs().year()} CRM Portal Travels (Pvt Ltd ).
+            &copy; {dayjs().year()} RGS UMRAH GROUP OF COMPANY'S.
           </a>
 
           <a className="text-sm" style={{ color: theme.colors.sidebarText }}>

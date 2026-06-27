@@ -274,6 +274,13 @@ body {
     height: 30px;
 }
 
+@media print {
+    .whatsapp-float-button,
+    .scroll-top-button {
+        display: none !important;
+    }
+}
+
 @media screen and (max-width: 640px) {
     .scroll-top-button {
         right: 16px;

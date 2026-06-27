@@ -21,7 +21,7 @@ const RegisterSchema = new mongoose.Schema(
 
     phone: {
       type: String,
-      required: true,
+      // required: true,
     },
 
     address: {
@@ -67,6 +67,9 @@ const RegisterSchema = new mongoose.Schema(
 
     companyName: {
       type: String,
+      required: true,
+      trim: true,
+      unique: true,
     },
 
     consultant: {

@@ -15,3 +15,13 @@ export const fetchZIPUmrahPkgs = async (req, res) => {
     });
   }
 };
+
+export const fetchUmrahRemainingSeats = async (req, res) => {
+  try {
+    const data = await zipAccountsService.fetchRemainingSeats();
+    res.status(200).json({ data });
+  } catch (error) {
+    console.log("Error fetching remaining seats", error.message);
+    res.status(400).json({ message: "Error fetching remaining seats" });
+  }
+};

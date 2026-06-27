@@ -123,7 +123,7 @@ const getPasswordResetEmailHTML = (resetLink, userName) => {
           text-decoration: none;
           border-radius: 25px;
           margin: 20px 0;
-          font-weight: bold;
+          font-weight: bold;   
         }
         .button:hover {
           background-color: #3a1c9a;
@@ -165,11 +165,12 @@ const getPasswordResetEmailHTML = (resetLink, userName) => {
             </ul>
           </div>
           <p>If you have any questions or concerns, please contact our support team.</p>
-          <p>Best regards,<br><strong>CRM Portal travel and tours (Pvt Ltd ) Team</strong></p>
+          <p>Best regards,<br><strong>RGS UMRAH GROUP OF COMPANY'S Team</strong></p>
         </div>
         <div class="footer">
-          <p>&copy; ${new Date().getFullYear()} CRM Portal travel and tours (Pvt Ltd ). All rights reserved.</p>
+          <p>&copy; ${new Date().getFullYear()} RGS UMRAH GROUP OF COMPANY'S. All rights reserved.</p>
           <p>This is an automated message, please do not reply to this email.</p>
+          <p>Developed by <a href="https://nexagensolution.com/" style="color: #666;">Nexagen Solution</a></p>
         </div>
       </div>
     </body>
@@ -189,19 +190,19 @@ export const sendPasswordResetEmail = async (
 
     // Construct reset link
     const frontendURL =
-      process.env.FRONTEND_URL || "https://rgs.zipaccounts.com";
+      process.env.FRONTEND_URL || "https://rgsumrah.pk";
     const resetLink = `${frontendURL}/auth/forgot-password?token=${resetToken}&userId=${userId}`;
 
     const mailOptions = {
       from: {
-        name: "CRM Portal travel and tours (Pvt Ltd )",
+        name: "RGS UMRAH GROUP OF COMPANY'S",
         address: process.env.EMAIL_USER,
       },
       to: email,
       subject:
-        "Password Reset Request - CRM Portal travel and tours (Pvt Ltd )",
+        "Password Reset Request - RGS UMRAH GROUP OF COMPANY'S",
       html: getPasswordResetEmailHTML(resetLink, userName),
-      text: `Hello ${userName},\n\nWe received a request to reset your password.\n\nPlease click the following link to reset your password:\n${resetLink}\n\nThis link will expire in 1 hour.\n\nIf you didn't request this, please ignore this email.\n\nBest regards,\nCRM Portal travel and tours (Pvt Ltd ) Team`,
+      text: `Hello ${userName},\n\nWe received a request to reset your password.\n\nPlease click the following link to reset your password:\n${resetLink}\n\nThis link will expire in 1 hour.\n\nIf you didn't request this, please ignore this email.\n\nBest regards,\nRGS UMRAH GROUP OF COMPANY'S Team`,
     };
 
     const info = await transporter.sendMail(mailOptions);
@@ -323,11 +324,11 @@ const getCredentialsEmailHTML = (
     <body>
       <div class="container">
         <div class="header">
-          <h1>🎉 Welcome to CRM Portal travel and tours (Pvt Ltd )!</h1>
+          <h1>🎉 Welcome to RGS UMRAH GROUP OF COMPANY'S</h1>
         </div>
         <div class="content">
           <p>Hello <strong>${userName}</strong>,</p>
-          <p>Welcome to CRM Portal travel and tours (Pvt Ltd )! Your agency account has been created successfully.</p>
+          <p>Welcome to RGS UMRAH GROUP OF COMPANY'S! Your agency account has been created successfully.</p>
           <p><strong>Company:</strong> ${companyName}</p>
           
           <div class="credentials-box">
@@ -350,7 +351,7 @@ const getCredentialsEmailHTML = (
           </div>
 
           <div style="text-align: center;">
-            <a href="${process.env.FRONTEND_URL || "https://rgs.zipaccounts.com"}/auth/login" class="button">Login to Your Account</a>
+            <a href="${process.env.FRONTEND_URL || "https://rgsumrah.pk"}/?agentCode=${agentCode}&email=${encodeURIComponent(email)}&password=${encodeURIComponent(password)}&auto=true" class="button">Login to Your Account</a>
           </div>
 
           <div class="warning">
@@ -364,11 +365,12 @@ const getCredentialsEmailHTML = (
           </div>
 
           <p>If you have any questions or need assistance, please don't hesitate to contact our support team.</p>
-          <p>Best regards,<br><strong>CRM Portal travel and tours (Pvt Ltd ) Team</strong></p>
+          <p>Best regards,<br><strong>RGS UMRAH GROUP OF COMPANY'S Team</strong></p>
         </div>
         <div class="footer">
-          <p>&copy; ${new Date().getFullYear()} CRM Portal travel and tours (Pvt Ltd ). All rights reserved.</p>
+          <p>&copy; ${new Date().getFullYear()} RGS UMRAH GROUP OF COMPANY'S. All rights reserved.</p>
           <p>This is an automated message, please do not reply to this email.</p>
+          <p>Developed by <a href="https://nexagensolution.com/" style="color: #666;">Nexagen Solution</a></p>
         </div>
       </div>
     </body>
@@ -405,12 +407,12 @@ export const sendCredentialsEmail = async (
 
     const mailOptions = {
       from: {
-        name: "CRM Portal travel and tours (Pvt Ltd )",
+        name: "RGS UMRAH GROUP OF COMPANY'S",
         address: process.env.EMAIL_USER,
       },
       to: email,
       subject:
-        "Your Agent Credentials - CRM Portal travel and tours (Pvt Ltd )",
+        "Your Agent Credentials - RGS UMRAH GROUP OF COMPANY'S",
       html: getCredentialsEmailHTML(
         agentCode,
         email,
@@ -418,7 +420,7 @@ export const sendCredentialsEmail = async (
         userName,
         companyName,
       ),
-      text: `Hello ${userName},\n\nWelcome to CRM Portal travel and tours (Pvt Ltd )! Your agency account has been created successfully.\n\nCompany: ${companyName}\n\nYour Login Credentials:\nAgent Code: ${agentCode}\nEmail: ${email}\nPassword: ${password}\n\nLogin URL: ${process.env.FRONTEND_URL || "https://rgs.zipaccounts.com"}/auth/login\n\nSecurity Tips:\n- Keep your credentials safe and secure\n- Do not share your password with anyone\n- We recommend changing your password after first login\n\nBest regards,\nCRM Portal travel and tours (Pvt Ltd )`,
+      text: `Hello ${userName},\n\nWelcome to RGS UMRAH GROUP OF COMPANY'S! Your agency account has been created successfully.\n\nCompany: ${companyName}\n\nYour Login Credentials:\nAgent Code: ${agentCode}\nEmail: ${email}\nPassword: ${password}\n\nLogin URL: ${process.env.FRONTEND_URL || "https://rgsumrah.pk"}/?agentCode=${agentCode}&email=${encodeURIComponent(email)}&password=${encodeURIComponent(password)}&auto=true\n\nSecurity Tips:\n- Keep your credentials safe and secure\n- Do not share your password with anyone\n- We recommend changing your password after first login\n\nBest regards,\nRGS UMRAH GROUP OF COMPANY'S Team`,
     };
 
     const info = await transporter.sendMail(mailOptions);

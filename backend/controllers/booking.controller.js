@@ -2,8 +2,6 @@
 // import GroupTicketing from "../models/GroupTicketing.js";
 // import mongoose from "mongoose";
 
-// const HOLD_DURATION = 2 * 60 * 60 * 1000; // 2 hours
-
 // // const adjustSeatsIfLocalGroup = async (groupId, seatChange, session, checkAvailability = false) => {
 // //   if (!mongoose.Types.ObjectId.isValid(groupId)) return; // External group → ignore
 
@@ -521,8 +519,9 @@ import GroupTicketing from "../models/GroupTicketing.js";
 import mongoose from "mongoose";
 import Register from "../models/Register.js";
 import { deductSeatsFromCache } from "../utils/cacheHelpers.js";
+import zipAccountsService from "../services/zipAccounts.service.js";
 
-const HOLD_DURATION = 2 * 60 * 60 * 1000;
+const HOLD_DURATION = 3 * 60 * 60 * 1000;
 // -------------------------
 // Helper Functions
 // -------------------------
@@ -531,20 +530,20 @@ const normalizeGroupId = (groupId) => groupId?.toString();
 
 /**
  * Adjust seats for local groups (admin groups)
- * 
+ *
  * This function is atomic and thread-safe using MongoDB's $inc operator.
- * 
+ *
  * Positive seatChange: Releases seats (booking cancelled)
  * Negative seatChange: Deducts seats (booking created/on-hold)
- * 
+ *
  * @param {String} groupId - MongoDB ObjectId of the GroupTicketing
  * @param {Number} seatChange - Seats to add (+) or remove (-)
  * @param {Boolean} checkAvailability - If true, throws error if insufficient seats
- * 
+ *
  * @example
  * // Booking created with 2 passengers
  * await adjustSeatsIfLocalGroup(groupId, -2, true); // Check availability
- * 
+ *
  * // Booking cancelled
  * await adjustSeatsIfLocalGroup(groupId, 2); // Release 2 seats
  */
@@ -568,7 +567,9 @@ const adjustSeatsIfLocalGroup = async (
     throw new Error("Not enough seats available");
 
   // Log the seat adjustment
-  console.log(`[SEAT ADJUSTMENT] GroupID: ${groupId}, Change: ${seatChange}, Success: ${result.modifiedCount > 0}`);
+  console.log(
+    `[SEAT ADJUSTMENT] GroupID: ${groupId}, Change: ${seatChange}, Success: ${result.modifiedCount > 0}`,
+  );
 };
 
 // -------------------------
@@ -576,20 +577,20 @@ const adjustSeatsIfLocalGroup = async (
 // -------------------------
 /**
  * Creates a new booking with automatic seat deduction
- * 
+ *
  * Flow:
  * 1. Validate passenger count and pricing
  * 2. Deduct seats from GroupTicketing (throws if insufficient)
  * 3. Create booking with "on hold" status
  * 4. Set expiry timer (30 minutes)
  * 5. Seats are automatically released if booking expires or is cancelled
- * 
+ *
  * Seat Tracking:
  * - Only counts adults + children (infants don't occupy seats)
  * - Deducted immediately (GroupTicketing.totalSeats -= seats)
  * - Will be restored by cron job if booking expires
  * - Can be manually restored by cancellation
- * 
+ *
  * @returns {Object} Booking document with auto-generated reference
  */
 export const createBooking = async (req, res) => {
@@ -605,7 +606,7 @@ export const createBooking = async (req, res) => {
       sector,
       pnr,
       contactPersonName,
-      adultsCount,  
+      adultsCount,
       childrenCount,
       infantsCount,
       totalPassengers,
@@ -628,9 +629,11 @@ export const createBooking = async (req, res) => {
     seatCount = adultsCount + childrenCount;
     const expiresAt = new Date(Date.now() + HOLD_DURATION);
     const groupId = normalizeGroupId(incomingGroupId);
-    const bookingSource = source || (isLocalGroup(groupId) ? "admin" : "sabaoon");
+    const bookingSource =
+      source || (isLocalGroup(groupId) ? "admin" : "sabaoon");
 
-    const isSabaoonGroup = bookingSource === "sabaoon" && !isLocalGroup(groupId);
+    const isSabaoonGroup =
+      bookingSource === "sabaoon" && !isLocalGroup(groupId);
 
     // 1️⃣ Deduct from local DB (existing logic)
     // This will throw an error if not enough seats available
@@ -663,7 +666,115 @@ export const createBooking = async (req, res) => {
       sabaoonBookingStatus: isSabaoonGroup ? "pending" : "not_applicable",
     });
 
-    // ─── Sabaoon and Al-Haider third-party API calls removed ───
+    // ─── Create booking in ZIP Accounts ───
+    try {
+      const user = await Register.findById(req.user._id).select(
+        "zipId name email",
+      );
+
+      if (user && user.zipId && user.zipId.trim()) {
+        const zipId = user.zipId.trim();
+
+        // Generate unique booking number for group ticketing
+        const timestamp = Date.now();
+        const randomSuffix = Math.random()
+          .toString(36)
+          .substring(2, 8)
+          .toUpperCase();
+        const zipBookingNumber = `GRP-${timestamp}-${randomSuffix}`;
+
+        // Use originalPkg from request body (sent by frontend which already has full group data)
+        const originalPkg = req.body.originalPkg || null;
+        if (originalPkg) {
+          console.log(
+            "📦 Using originalPkg from request body:",
+            originalPkg.sector || originalPkg.id,
+          );
+        } else {
+          console.warn("⚠️ originalPkg not provided in request body");
+        }
+
+        // Prepare consistent metadata structure
+        const groupTicketingMetadata = {
+          localBookingId: booking._id.toString(),
+          bookingNumber: zipBookingNumber,
+          bookingReference: booking.bookingReference,
+          packageId: groupId,
+          packageType: "GroupTicketing",
+          totalPassengers: totalPassengers,
+          adultsCount: adultsCount,
+          childrenCount: childrenCount,
+          infantsCount: infantsCount,
+          originalPkg: originalPkg,
+          contactInfo: {
+            name: contactPersonName,
+            email: user.email,
+            phone: passengers[0]?.phone || "",
+          },
+          passengers: passengers.map((p) => ({
+            type: p.type || "Adult",
+            name: p.name || `${p.givenName || ""} ${p.surName || ""}`.trim(),
+            givenName: p.givenName,
+            surName: p.surName,
+            passport: p.passport || p.passportNumber,
+            dob: p.dateOfBirth || p.dob,
+            passportExpiry: p.passportExpiry || null,
+            nationality: p.nationality,
+            gender: p.gender,
+            documentUrl: p.documentUrl,
+          })),
+          groupDetails: {
+            airline: airline,
+            sector: sector,
+            pnr: pnr,
+            groupType: groupType,
+            source: bookingSource,
+          },
+          flightDetails: flights,
+          pricing: {
+            adultTotal: pricing.adultTotal,
+            childTotal: pricing.childTotal,
+            infantTotal: pricing.infantTotal,
+            grandTotal: pricing.grandTotal,
+            currency: pricing.currency || "PKR",
+          },
+          dates: {
+            departure: departureDate,
+            arrival: arrivalDate,
+          },
+          createdBy: user.email,
+          userId: req.user._id.toString(),
+        };
+
+        // Prepare ZIP booking data with consistent structure
+        const zipBookingData = {
+          refNo: zipBookingNumber,
+          bookingId: zipBookingNumber,
+          type: "GroupTicketing",
+          bookingAgainst: groupId,
+          status: "pending",
+          payments: [],
+          metadata: groupTicketingMetadata,
+          is_void: false,
+          created_by: zipId,
+        };
+
+        const zipResult =
+          await zipAccountsService.createPKGBooking(zipBookingData);
+        console.log("✅ ZIP Accounts booking created:", zipResult);
+
+        // Store ZIP booking info in local booking
+        booking.zipBookingId = zipResult.data?._id || zipResult._id;
+        booking.zipBookingRefNo = zipResult.data?.refNo || zipResult.refNo;
+        await booking.save();
+      }
+    } catch (zipError) {
+      console.error(
+        "❌ ZIP Accounts booking failed (non-critical):",
+        zipError.message,
+      );
+      // Continue - local booking already created
+    }
 
     res.status(201).json({ success: true, data: booking });
   } catch (err) {

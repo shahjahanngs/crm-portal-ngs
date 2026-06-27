@@ -35,4 +35,10 @@ export const groupTypes = [
     path: "group-ticketing",
     ownGroupType: "Group Ticketing",
   },
+  {
+    label: "Hotels",
+    value: "HOTELS",
+    path: "hotels",
+    ownGroupType: "Hotels",
+  },
 ];

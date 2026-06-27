@@ -29,8 +29,12 @@ import { getUserProfile } from "../../api/profileApi";
 import { theme } from "../../theme/theme";
 import DetailPage from "./AllGroups/DetailPage";
 import UmrahBooking from "./UmrahPackagebooking/UmrahPackageBooking";
+import UmrahBookingPage from "./UmrahBookingPage";
 import AllGroupsPackages from "./AllGroups/Allgroups";
 import GroupTicketingPage from "./GroupTicketing";
+import OtherServices from "./Others/OtherServices";
+import HotelsPage from "./Hotels";
+import OthersBookings from "./Others/Bookings";
 
 export default function Frontend() {
   const [user, setUser] = useState(null);
@@ -205,6 +209,22 @@ export default function Frontend() {
         }
       />
       <Route
+        path="/hotels"
+        element={
+          user ? (
+            <>
+              <Header user={user} handleLogout={handleLogout} />
+              <div className="min-h-screen bg-slate-50 pt-32 pb-16 px-4 sm:px-6">
+                <HotelsPage />
+              </div>
+              <Footer user={user} />
+            </>
+          ) : (
+            <Navigate to="/" replace />
+          )
+        }
+      />
+      <Route
         path="/payment"
         element={
           user ? (
@@ -304,8 +324,19 @@ export default function Frontend() {
         />
         <Route path="booking" element={<BookingForm user={user} />} />
         <Route path="pkg-detail" element={<DetailPage user={user} />} />
+        <Route path="book-umrah" element={<UmrahBookingPage user={user} />} />
+        <Route path="other-services" element={<OtherServices user={user} />} />
         <Route path="umrah-booking" element={<UmrahBooking />} />
         <Route path="banks" element={<Bank />} />
+        <Route path="visa-bookings" element={<OthersBookings type="Visa" />} />
+        <Route
+          path="hotel-bookings"
+          element={<OthersBookings type="Hotel" />}
+        />
+        <Route
+          path="transport-bookings"
+          element={<OthersBookings type="Transport" />}
+        />
         <Route path="payment" element={<Payment />} />
         <Route path="ledger" element={<Ledger />} />
         <Route path="my-bookings" element={<MyBookings />} />

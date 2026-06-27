@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { Ticket, Menu, X } from "lucide-react";
+import { Ticket, Menu, X, Users } from "lucide-react";
 import {
   FaPlane,
   FaSuitcase,
@@ -343,7 +343,10 @@ export default function AllGroupsPackages({
 
   return (
     <>
-      <TopBar title={"Group Tickets"} />
+      <TopBar
+        title={"Group Tickets"}
+        icon={<Users className="text-white w-6 h-6" />}
+      />
       <div
         className="w-full min-h-screen"
         style={{ background: theme.colors.background }}

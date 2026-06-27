@@ -1,6 +1,8 @@
 import UmrahPackageBooking from "../models/UmrahPackageBooking.js";
+import Register from "../models/Register.js";
 import zipAccountsService from "../services/zipAccounts.service.js";
 import { mapToHotelUmrahVoucherPayload } from "../utils/transform.js";
+import mongoose from "mongoose";
 
 /* ===========================
    CREATE UMRAH PACKAGE BOOKING
@@ -73,11 +75,28 @@ export const createUmrahBooking = async (req, res) => {
       };
     }
 
-    // Calculate total price
+    // Calculate total price by passenger type
     const totalPassengers = passengers?.length || 0;
-    const totalPrice = pricing?.pricePerPerson
-      ? pricing.pricePerPerson * totalPassengers
-      : 0;
+    const adultCount = passengers.filter((p) => p.type === "Adult").length;
+    const childCount = passengers.filter((p) => p.type === "Child").length;
+    const infantCount = passengers.filter((p) => p.type === "Infant").length;
+
+    const adultPrice = parseFloat(pricing?.pricePerPerson || pricing?.adultPrice || 0);
+    const childPrice = parseFloat(
+      pricing?.childPrice ||
+      req.body["pricing[childPrice]"] ||
+      0
+    );
+    const infantPrice = parseFloat(
+      pricing?.infantPrice ||
+      req.body["pricing[infantPrice]"] ||
+      0
+    );
+
+    const adultTotal = adultCount * adultPrice;
+    const childTotal = childCount * childPrice;
+    const infantTotal = infantCount * infantPrice;
+    const totalPrice = adultTotal + childTotal + infantTotal;
 
     const bookingData = {
       bookingNumber,
@@ -89,6 +108,12 @@ export const createUmrahBooking = async (req, res) => {
       roomType: req.body.roomType,
       pricing: {
         ...pricing,
+        adultPrice,
+        childPrice,
+        infantPrice,
+        adultTotal,
+        childTotal,
+        infantTotal,
         totalPrice,
       },
       flightDetails,
@@ -103,6 +128,119 @@ export const createUmrahBooking = async (req, res) => {
     };
 
     const booking = await UmrahPackageBooking.create(bookingData);
+
+    // Create booking in ZIP Accounts
+    try {
+      // Fetch user details to get zipId
+      const user = await Register.findById(req.body.user).select(
+        "zipId name email",
+      );
+
+      if (!user || !user.zipId) {
+        console.warn(
+          "⚠️ User not found or zipId missing. Skipping ZIP booking creation.",
+          { userId: req.body.user, hasUser: !!user, zipId: user?.zipId },
+        );
+      } else {
+        // Validate zipId is not empty string
+        const zipId = user.zipId.trim();
+        if (!zipId) {
+          console.warn(
+            "⚠️ zipId is empty string. Skipping ZIP booking creation.",
+          );
+          throw new Error("User zipId is empty");
+        }
+
+        console.log(
+          "🔄 Creating ZIP Accounts booking for:",
+          user.email,
+          "zipId:",
+          zipId,
+        );
+
+        // Convert package ID to ObjectId, but keep zipId as string
+        const packageIdObjectId = new mongoose.Types.ObjectId(
+          booking.packageId,
+        );
+
+        // Use originalPkg directly from frontend (sent as packageData field in FormData)
+        let originalPkg = null;
+        try {
+          const rawPkgData = req.body.packageData || req.body.originalPkg;
+          if (rawPkgData) {
+            originalPkg =
+              typeof rawPkgData === "string"
+                ? JSON.parse(rawPkgData)
+                : rawPkgData;
+            console.log(
+              "📦 Using originalPkg from request body:",
+              originalPkg.packageName || originalPkg.title || originalPkg._id,
+            );
+          } else {
+            console.warn("⚠️ No packageData/originalPkg found in request body");
+          }
+        } catch (parseErr) {
+          console.error("❌ Error parsing packageData:", parseErr.message);
+        }
+
+        const umrahPackageDetail = {
+          localBookingId: booking._id.toString(),
+          packageId: booking.packageId,
+          packageName: booking.packageName,
+          packageSource: booking.packageSource,
+          roomType: booking.roomType,
+          totalPassengers: totalPassengers,
+          totalPrice: totalPrice,
+          currency: pricing?.currency || "PKR",
+          originalPkg: originalPkg,
+          passengers: passengers.map((p) => ({
+            type: p.type,
+            title: p.title,
+            givenName: p.givenName,
+            surName: p.surName,
+            name: `${p.givenName} ${p.surName}`,
+            passport: p.passport,
+            passportExpiry: p.passportExpiry || "",
+            dob: p.dateOfBirth,
+            dateOfBirth: p.dateOfBirth,
+            nationality: p.nationality,
+          })),
+          flightDetails: flightDetails,
+          specialRequests: req.body.specialRequests,
+        };
+        // Prepare ZIP booking data - zipId is kept as string
+        const zipBookingData = {
+          refNo: bookingNumber,
+          bookingId: bookingNumber,
+          type: "UmrahPackage",
+          bookingAgainst: packageIdObjectId,
+          status: "pending",
+          payments: [],
+          metadata: umrahPackageDetail,
+          is_void: false,
+          created_by: zipId,
+        };
+
+        // Create booking in ZIP Accounts
+        const zipResponse =
+          await zipAccountsService.createPKGBooking(zipBookingData);
+        console.log(zipResponse);
+
+        // Update local booking with ZIP booking info
+        booking.zipBookingId = zipResponse.data?._id || zipResponse._id;
+        booking.zipBookingRefNo = zipResponse.data?.refNo || zipResponse.refNo;
+        booking.zipBookingData = zipResponse;
+        booking.zipBookingCreatedAt = new Date();
+
+        await booking.save();
+
+        console.log("✅ ZIP Accounts booking created:");
+      }
+    } catch (zipError) {
+      console.error("❌ Error creating ZIP booking:", zipError.message);
+      // Don't fail the main booking if ZIP creation fails
+      // Just log the error and continue
+    }
 
     res.status(201).json({
       success: true,
@@ -646,6 +784,10 @@ export const updateHotelStatus = async (req, res) => {
           // If package is from ZIP accounts, fetch the full package data
           if (booking.packageSource === "zip-accounts") {
             try {
+              console.log(
+                "🔍 Fetching ZIP Umrah package for voucher, ID:",
+                booking.packageId,
+              );
               const zipPackages = await zipAccountsService.fetchUmrahPackages();
               const foundPackage = zipPackages.data?.find(
                 (pkg) =>
@@ -654,15 +796,24 @@ export const updateHotelStatus = async (req, res) => {
 
               if (foundPackage) {
                 packageData = foundPackage;
-                console.log("📦 Found ZIP package data for voucher creation");
+                console.log(
+                  "📦 Found ZIP package data for voucher creation:",
+                  foundPackage.packageName,
+                );
+              } else {
+                console.warn(
+                  "⚠️ ZIP package not found for voucher, using minimal data",
+                );
               }
             } catch (fetchError) {
               console.error(
-                "⚠️ Could not fetch ZIP package data:",
+                "❌ Could not fetch ZIP package data:",
                 fetchError.message,
               );
               // Continue with minimal package data
             }
+          } else {
+            console.log("ℹ️ Local package source for voucher");
           }
 
           const voucherData = {
@@ -673,6 +824,8 @@ export const updateHotelStatus = async (req, res) => {
             roomType: booking.roomType,
             specialRequests: booking.specialRequests,
             pricing: booking.pricing,
+            originalPkg:
+              Object.keys(packageData).length > 0 ? packageData : null,
             packageData:
               Object.keys(packageData).length > 0
                 ? JSON.stringify(packageData)

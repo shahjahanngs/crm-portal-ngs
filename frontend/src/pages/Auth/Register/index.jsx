@@ -205,7 +205,7 @@ const Register = () => {
                     autoComplete="tel"
                     value={formData.phone}
                     onChange={handleChange}
-                    required
+                    // required
                     className="w-full px-4 py-3 rounded border border-gray-300 focus:outline-none focus:ring-2 focus:ring-[#2A166D] focus:border-transparent text-gray-900 placeholder:text-gray-500"
                   />
                 </div>

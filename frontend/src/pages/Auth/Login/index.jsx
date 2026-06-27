@@ -1,11 +1,12 @@
 import { useEffect, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import axiosInstance from "../../../api/axios";
 import { toast } from "react-toastify";
 import logo from "../../../assets/images/logo.png";
 import bg from "../../../assets/images/bgaeroplane.webp";
 
 const Login = ({ onLogin }) => {
+  const navigate = useNavigate();
   const [formData, setFormData] = useState({
     email: "",
     password: "",
@@ -35,9 +36,9 @@ const Login = ({ onLogin }) => {
         toast.success("Login successful!");
         if (user.role === "Admin") {
           window.location.href = "/admin-portal/";
-        } else {
-          window.location.href = "/";
+        } else if (user.role !== "Admin") {
           if (onLogin) onLogin(user);
+          navigate("/dashboard");
         }
       }
     } catch (error) {

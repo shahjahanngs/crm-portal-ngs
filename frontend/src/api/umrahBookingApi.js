@@ -1,10 +1,23 @@
 import axiosInstance from "./axios";
 
+// Submit Umrah booking to ZIP Accounts CRM
+export const submitZipUmrahBooking = async (payload) => {
+  try {
+    const response = await axiosInstance.post(
+      "/zip-accounts/submit-booking",
+      payload,
+    );
+    return response.data;
+  } catch (error) {
+    console.error("Error submitting ZIP Umrah booking:", error);
+    throw error;
+  }
+};
+
 // Create a new Umrah booking
 export const createUmrahBooking = async (bookingData) => {
   try {
-    const response = await axiosI
-    nstance.post("/umrah-bookings", bookingData, {
+    const response = await axiosInstance.post("/umrah-bookings", bookingData, {
       headers:
         bookingData instanceof FormData
           ? { "Content-Type": "multipart/form-data" }

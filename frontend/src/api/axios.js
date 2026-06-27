@@ -2,7 +2,8 @@ import axios from "axios";
 
 const axiosInstance = axios.create({
   // baseURL: "http://localhost:8016/api", // backend ka port
-  baseURL: "https://rgs.zipaccounts.com/api", // backend ka port
+  // baseURL: "https://rgs.zipaccounts.com/api", // backend ka port
+  baseURL: "https://rgsumrah.com/api", // backend ka port
   withCredentials: true,
 });
 

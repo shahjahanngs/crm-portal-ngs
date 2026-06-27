@@ -2,13 +2,203 @@ import { useState, useEffect } from "react";
 import { useNavigate, useSearchParams, useLocation } from "react-router-dom";
 import axiosInstance from "../../api/axios";
 import { toast } from "react-toastify";
-import { generateBookingPDF } from "../../utils";
-import { format } from "date-fns";
 import MaskedDatePicker from "../../components/MaskedDatePicker";
 import { printGDSBooking } from "../../utils/bookingPDFService";
-import { Check } from "lucide-react";
-import { generateClientPDF } from "../../utils/genrateclientpdf";
+import { Check, CalendarCheck } from "lucide-react";
 import TopBar from "../../components/TopBar/TopBar";
+
+const parseStoredUser = () => {
+  try {
+    return JSON.parse(localStorage.getItem("frontend_user") || "{}");
+  } catch {
+    return {};
+  }
+};
+
+const normalizeStatus = (status) => {
+  const value = String(status || "").toLowerCase();
+  if (value === "pending") return "on hold";
+  if (value === "completed") return "confirmed";
+  if (value === "canceled" || value === "void") return "cancelled";
+  return value || "on hold";
+};
+
+const splitPassengerName = (passenger = {}) => {
+  if (passenger.givenName || passenger.surName) {
+    return {
+      givenName: passenger.givenName || passenger.name || "",
+      surName: passenger.surName || "",
+    };
+  }
+
+  const parts = String(passenger.name || "").trim().split(/\s+/);
+  return {
+    givenName: parts.slice(0, -1).join(" ") || parts[0] || "",
+    surName: parts.length > 1 ? parts[parts.length - 1] : "",
+  };
+};
+
+const normalizeZipBooking = (booking, currentUser = {}) => {
+  const metadata = booking.metadata || {};
+  const groupDetails = metadata.groupDetails || {};
+  const originalPkg = metadata.originalPkg || {};
+  const pricing = metadata.pricing || {};
+  const dates = metadata.dates || {};
+  const flights = metadata.flightDetails || metadata.flights || originalPkg.flights || [];
+  const airline =
+    typeof groupDetails.airline === "string"
+      ? { name: groupDetails.airline }
+      : groupDetails.airline ||
+        metadata.airline ||
+        originalPkg.airline ||
+        {};
+
+  const passengers = (metadata.passengers || booking.passengers || []).map(
+    (passenger) => {
+      const names = splitPassengerName(passenger);
+      return {
+        type: passenger.type || "Adult",
+        title: passenger.title || "",
+        givenName: names.givenName,
+        surName: names.surName,
+        passport: passenger.passport || passenger.passportNumber || "",
+        dateOfBirth: passenger.dateOfBirth || passenger.dob || null,
+        passportExpiry: passenger.passportExpiry || null,
+        nationality: passenger.nationality || "",
+        documentUrl: passenger.documentUrl || null,
+      };
+    },
+  );
+
+  const adultsCount =
+    metadata.adultsCount ??
+    passengers.filter((passenger) => passenger.type === "Adult").length;
+  const childrenCount =
+    metadata.childrenCount ??
+    passengers.filter((passenger) => passenger.type === "Child").length;
+  const infantsCount =
+    metadata.infantsCount ??
+    passengers.filter((passenger) => passenger.type === "Infant").length;
+  const totalPassengers =
+    metadata.totalPassengers ??
+    passengers.length ??
+    adultsCount + childrenCount + infantsCount;
+  const firstFlight = Array.isArray(flights) ? flights[0] : null;
+  const lastFlight = Array.isArray(flights) ? flights[flights.length - 1] : null;
+  const localBookingId = metadata.localBookingId;
+
+  return {
+    ...booking,
+    _id: localBookingId || `zip-${booking._id || booking.bookingId || booking.refNo}`,
+    localBookingId,
+    zipBookingId: booking._id,
+    zipBookingRefNo: booking.refNo || booking.bookingId || metadata.bookingNumber,
+    isZipBooking: true,
+    source: "zip-api",
+    status: normalizeStatus(booking.status || metadata.status),
+    bookingReference:
+      metadata.bookingReference ||
+      metadata.bookingNumber ||
+      booking.refNo ||
+      booking.bookingId ||
+      "N/A",
+    groupId: metadata.packageId || booking.bookingAgainst || originalPkg._id,
+    groupType: groupDetails.groupType || metadata.packageType || booking.type,
+    airline: {
+      id: airline.id || airline._id || airline.code || "",
+      name:
+        airline.name ||
+        airline.airline ||
+        airline.airlineName ||
+        originalPkg.airlineName ||
+        "N/A",
+      logoUrl: airline.logoUrl || airline.logo_url || airline.logo || "",
+    },
+    sector: groupDetails.sector || metadata.sector || originalPkg.sector || "",
+    pnr: groupDetails.pnr || metadata.pnr || originalPkg.pnr || "",
+    contactPersonName:
+      metadata.contactInfo?.name ||
+      passengers[0]?.givenName ||
+      currentUser.name ||
+      "N/A",
+    adultsCount,
+    childrenCount,
+    infantsCount,
+    totalPassengers,
+    pricing: {
+      ...pricing,
+      grandTotal: pricing.grandTotal || metadata.totalPrice || 0,
+    },
+    passengers,
+    flights,
+    departureDate:
+      dates.departure ||
+      groupDetails.departureDate ||
+      firstFlight?.depDate ||
+      firstFlight?.flightDate ||
+      firstFlight?.departureDate ||
+      originalPkg.departureDate,
+    arrivalDate:
+      dates.arrival ||
+      groupDetails.arrivalDate ||
+      lastFlight?.arrDate ||
+      lastFlight?.arrivalDate ||
+      originalPkg.arrivalDate,
+    userId: {
+      name: currentUser.name || metadata.contactInfo?.name || "N/A",
+      email: currentUser.email || metadata.contactInfo?.email || "",
+      agencyCode: currentUser.agencyCode || "",
+      companyName: currentUser.companyName || currentUser.name || "N/A",
+      phone: currentUser.phone || metadata.contactInfo?.phone || "",
+    },
+  };
+};
+
+const getZipBookingsArray = (payload) => {
+  if (Array.isArray(payload)) return payload;
+  if (Array.isArray(payload?.bookings)) return payload.bookings;
+  if (Array.isArray(payload?.data?.bookings)) return payload.data.bookings;
+  if (Array.isArray(payload?.data)) return payload.data;
+  return [];
+};
+
+const matchesBookingFilters = (booking, { activeStatus, filters, searchQuery }) => {
+  const status = normalizeStatus(booking.status);
+  const requestedStatus = activeStatus ? normalizeStatus(activeStatus) : "";
+
+  if (requestedStatus) {
+    const acceptedStatuses =
+      requestedStatus === "on hold" ? ["on hold", "pending"] : [requestedStatus];
+    if (!acceptedStatuses.includes(status)) return false;
+  }
+
+  if (filters.sector && booking.sector !== filters.sector) return false;
+  if (filters.airline && booking.airline?.name !== filters.airline) return false;
+
+  if (filters.fromDate) {
+    const bookingDate = booking.departureDate ? new Date(booking.departureDate) : null;
+    const filterDate = new Date(filters.fromDate);
+    filterDate.setHours(0, 0, 0, 0);
+    if (!bookingDate || bookingDate < filterDate) return false;
+  }
+
+  const search = searchQuery.trim().toLowerCase();
+  if (!search) return true;
+
+  return [
+    booking.bookingReference,
+    booking.pnr,
+    booking.contactPersonName,
+    booking.userId?.companyName,
+    booking.userId?.agencyCode,
+    booking.airline?.name,
+    booking.sector,
+    booking.passengers?.[0]?.givenName,
+    booking.passengers?.[0]?.surName,
+  ]
+    .filter(Boolean)
+    .some((value) => String(value).toLowerCase().includes(search));
+};
 
 export default function MyBookings() {
   const navigate = useNavigate();
@@ -62,7 +252,7 @@ export default function MyBookings() {
     if (location.state?.bookingSuccess) {
       setSuccessModalData({
         ref: location.state.bookingReference,
-        deadline: new Date(location.state.expiresAt), // use backend expiry
+        deadline: location.state.expiresAt,
       });
       window.history.replaceState({}, document.title);
     }
@@ -85,21 +275,26 @@ export default function MyBookings() {
     return { hours, minutes, seconds, expired: false };
   };
 
-  // --- UPDATED: 12-HOUR FORMAT ---
-  const formatDeadline = (date) => {
-    if (!date) return "";
-    // Changed hour12 to true
-    const timeStr = date.toLocaleTimeString("en-US", {
+  const formatDeadline = (deadline) => {
+    if (!deadline) return "N/A";
+
+    const deadlineDate = new Date(deadline);
+    if (Number.isNaN(deadlineDate.getTime())) return "N/A";
+
+    const dateStr = deadlineDate.toLocaleDateString("en-GB", {
+      day: "2-digit",
+      month: "short",
+      year: "numeric",
+      timeZone: "Asia/Karachi",
+    });
+    const timeStr = deadlineDate.toLocaleTimeString("en-US", {
       hour: "2-digit",
       minute: "2-digit",
       hour12: true,
+      timeZone: "Asia/Karachi",
     });
-    const dateStr = date.toLocaleDateString("en-US", {
-      month: "long",
-      day: "numeric",
-      year: "numeric",
-    });
-    return `${timeStr}, ${dateStr}`;
+
+    return `${dateStr}, ${timeStr} PKT`;
   };
 
   useEffect(() => {
@@ -137,22 +332,40 @@ export default function MyBookings() {
   const fetchBookings = async () => {
     try {
       setFetching(true);
+      const currentUser = parseStoredUser();
 
-      const params = new URLSearchParams({
-        ...(searchQuery && { search: searchQuery }),
-        ...(activeStatus && { status: activeStatus }),
-        ...(filters.sector && { sector: filters.sector }),
-        ...(filters.airline && { airline: filters.airline }),
-        ...(filters.fromDate && {
-          fromDate: format(filters.fromDate, "yyyy-MM-dd"),
+      const [zipResult] = await Promise.allSettled([
+        axiosInstance.get("/zip-accounts/get-booking", {
+          params: { type: "GroupTicketing" },
         }),
-      });
+      ]);
 
-      const response = await axiosInstance.get(`/bookings?${params}`);
-
-      if (response.data.success) {
-        setBookings(response.data.data);
+      if (zipResult.status === "rejected") {
+        throw zipResult.reason;
       }
+
+      const zipResponse = zipResult.value;
+      const zipBookings = zipResponse.data?.success
+        ? getZipBookingsArray(zipResponse.data.data)
+        : [];
+      const currentUserZipId = currentUser.zipId || currentUser.id;
+      const isAdmin = String(currentUser.role || "").toLowerCase() === "admin";
+
+      const normalizedZipBookings = zipBookings
+        .filter((booking) => booking.type === "GroupTicketing")
+        .filter((booking) => {
+          if (isAdmin || !currentUserZipId) return true;
+          return booking.created_by === currentUserZipId;
+        })
+        .map((booking) => normalizeZipBooking(booking, currentUser));
+
+      const mergedBookings = [...normalizedZipBookings]
+        .filter((booking) =>
+          matchesBookingFilters(booking, { activeStatus, filters, searchQuery }),
+        )
+        .sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
+
+      setBookings(mergedBookings);
     } catch (err) {
       console.error("Error fetching bookings:", err);
       toast.error("Failed to load bookings");
@@ -209,7 +422,10 @@ export default function MyBookings() {
 
   return (
     <div className="w-full min-h-screen mx-auto px-4">
-      <TopBar title={" My Bookings"} />
+      <TopBar
+        title={" My Bookings"}
+        icon={<CalendarCheck className="text-white w-6 h-6" />}
+      />
       {/* Header */}
       {/* <div className="mb-6">
         <h1 className="text-2xl sm:text-3xl font-bold text-gray-900 mb-2">
@@ -336,7 +552,10 @@ export default function MyBookings() {
                 bookings.map((booking) => {
                   const statusBadge = getStatusBadge(booking.status);
                   const firstPassenger = booking.passengers?.[0];
-                  console.log("Booking Data", booking);
+                  const localBookingId = booking.localBookingId || booking._id;
+                  const canOpenLocalBooking =
+                    !booking.isZipBooking || Boolean(booking.localBookingId);
+                  const canManageBooking = canOpenLocalBooking;
                   return (
                     <tr
                       key={booking._id}
@@ -360,12 +579,17 @@ export default function MyBookings() {
                             <span className="font-semibold text-gray-800">
                               AGT #:
                             </span>
-                            {booking.userId.agencyCode}
+                            {booking.userId?.agencyCode || "N/A"}
                             <span className="mx-2 font-semibold text-gray-800">
                               BK#:
                             </span>
                             {booking.bookingReference}
                           </div>
+                          {booking.isZipBooking && (
+                            <div className="text-xs text-blue-700 font-medium">
+                              ZIP Ref: {booking.zipBookingRefNo || "N/A"}
+                            </div>
+                          )}
                           <div className="text-xs text-gray-600 pt-0.5">
                             Created: {formatDate(booking.createdAt)}
                           </div>
@@ -566,12 +790,20 @@ export default function MyBookings() {
                             {/* View Details - Available for all bookings */}
                             <button
                               onClick={() =>
-                                navigate(
-                                  `/dashboard/booking-detail/${booking._id}`,
-                                )
+                                canOpenLocalBooking &&
+                                navigate(`/dashboard/booking-detail/${localBookingId}`)
                               }
-                              className="p-2.5 text-slate-600 bg-slate-100 hover:bg-slate-200 hover:text-slate-700 rounded-lg transition-all shadow-sm hover:shadow-md border border-slate-200"
-                              title="View Details"
+                              disabled={!canOpenLocalBooking}
+                              className={`p-2.5 rounded-lg transition-all shadow-sm border border-slate-200 ${
+                                canOpenLocalBooking
+                                  ? "text-slate-600 bg-slate-100 hover:bg-slate-200 hover:text-slate-700 hover:shadow-md"
+                                  : "text-slate-300 bg-slate-50 cursor-not-allowed"
+                              }`}
+                              title={
+                                canOpenLocalBooking
+                                  ? "View Details"
+                                  : "ZIP booking details available in CRM only"
+                              }
                             >
                               <svg
                                 className="w-4 h-4"
@@ -594,13 +826,14 @@ export default function MyBookings() {
                               </svg>
                             </button>
                             {/* Edit and Delete only for on hold/pending */}
-                            {(booking.status === "on hold" ||
-                              booking.status === "pending") && (
+                            {canManageBooking &&
+                              (booking.status === "on hold" ||
+                                booking.status === "pending") && (
                               <>
                                 <button
                                   onClick={() =>
                                     navigate(
-                                      `/dashboard/edit-booking/${booking._id}`,
+                                      `/dashboard/edit-booking/${localBookingId}`,
                                     )
                                   }
                                   className="p-2.5 text-slate-600 bg-slate-100 hover:bg-slate-200 hover:text-slate-700 rounded-lg transition-all shadow-sm hover:shadow-md border border-slate-200"
@@ -638,7 +871,7 @@ export default function MyBookings() {
                                       setDeletingId(booking._id);
 
                                       await axiosInstance.delete(
-                                        `/bookings/${booking._id}`,
+                                        `/bookings/${localBookingId}`,
                                       );
 
                                       toast.success(
